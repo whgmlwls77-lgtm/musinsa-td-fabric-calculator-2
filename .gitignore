@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+output/
+uploads/
+*.dxf
+app_v1_backup.py
+app_v2_backup.py
+.streamlit/secrets.toml

@@ -1,0 +1,7 @@
+streamlit>=1.30
+ezdxf>=1.2
+shapely>=2.0
+matplotlib>=3.7
+pandas>=2.0
+reportlab>=4.0
+openpyxl>=3.1
