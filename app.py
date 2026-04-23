@@ -363,47 +363,57 @@ def infer_material_v3(
     annotations: list[str],
 ) -> str:
     """
-    V3 우선순위:
-      1. ANNOTATION 에 한글 재질 키워드
-         "안감" → 안감, "심지" → 심지, "배색" → 배색, "주머니"/"포켓" → 주머니감
-      2. 피스 이름 키워드 (V2 와 동일)
-      3. DXF material 코드 (FN/IL/1)
+    V3.2 우선순위:
+      1. ANNOTATION 한글/영문 재질 키워드
+      2. 피스 이름 키워드 (한글/영문)
+      3. DXF material 코드 — 영문(SELF/FUSE/LINING/CONTRAST/POCKET) + 레거시(1/FN/IL)
       4. 기본 → 주원단
     """
     # 1) ANNOTATION 검사 (우선순위 최상 — 파일에 명시된 의도).
     ann_joined = " ".join(annotations).lower()
     ann_original = " ".join(annotations)  # 한글 확인용 (원문)
 
-    if "안감" in ann_original:
+    if "안감" in ann_original or "lining" in ann_joined:
         return "안감"
-    if "심지" in ann_original:
+    if "심지" in ann_original or "fuse" in ann_joined or "interfacing" in ann_joined:
         return "심지"
-    if "배색" in ann_original:
+    if "배색" in ann_original or "contrast" in ann_joined:
         return "배색"
     if "주머니" in ann_original or "포켓" in ann_original or "pocket" in ann_joined:
         return "주머니감"
 
-    # 2) 피스 이름 (V2 로직 유지).
+    # 2) 피스 이름 키워드 (한/영 모두).
     name = piece_name or ""
     name_lower = name.lower()
-    if "심지" in name or name.startswith("심지_"):
+    if "심지" in name or name.startswith("심지_") or "fuse" in name_lower or "fusing" in name_lower or "interfacing" in name_lower:
         return "심지"
     if "안감" in name or "lining" in name_lower:
         return "안감"
-    if "배색" in name:
+    if "배색" in name or "contrast" in name_lower:
         return "배색"
     if "주머니" in name or "pocket" in name_lower:
         return "주머니감"
 
-    # 3) DXF 재질 코드.
-    code = (material_raw or "").strip()
-    if code == "FN":
+    # 3) DXF 재질 코드 — 영문 표준 + 레거시 숫자/약어 모두 지원.
+    code = (material_raw or "").strip().upper()
+
+    # 심지 (Fusing / Interfacing)
+    if code in ("FUSE", "FN", "FUSING", "INTERFACING", "INTERLINING"):
         return "심지"
-    if code == "IL":
+    # 안감 (Lining)
+    if code in ("LINING", "IL", "INNER LINING", "LIN"):
         return "안감"
-    if code == "1" or code == "":
+    # 배색 (Contrast)
+    if code in ("CONTRAST", "CT", "CONT"):
+        return "배색"
+    # 주머니감 (Pocket fabric — 재질 코드로 쓰였을 때)
+    if code in ("POCKET", "PK", "PKT"):
+        return "주머니감"
+    # 주원단/제감 (Self / Main)
+    if code in ("SELF", "1", "MAIN", "FABRIC", ""):
         return "주원단"
 
+    # 알려지지 않은 코드 → 기본값
     return "주원단"
 
 
@@ -430,6 +440,76 @@ def is_scale_box(bbox_cm, coords_cm) -> bool:
         return (poly.area / hull.area) >= 0.95
     except Exception:
         return False
+
+
+# ╔════════════════════════════════════════════════════════════╗
+# ║ 단위 자동 감지 (DXF 좌표 → cm 변환 스케일)                 ║
+# ╚════════════════════════════════════════════════════════════╝
+from ezdxf import bbox as _ezbbox
+
+# $INSUNITS → (scale_to_cm, 단위명)
+_INSUNITS_MAP = {
+    1: (2.54, "inch"),
+    4: (0.1,  "mm"),
+    5: (1.0,  "cm"),
+    6: (100.0, "m"),
+}
+
+
+def detect_unit_scale_to_cm(doc) -> tuple[float, str]:
+    """
+    DXF 도면의 단위를 감지하여 'cm' 로 환산할 스케일을 반환한다.
+
+    전략:
+      1. $INSUNITS 헤더값 확인 (mm/cm/inch/m)
+      2. 도면 전체 bbox 크기로 교차 검증 (의류 패턴 현실 스케일과 비교)
+      3. 헤더와 좌표가 불일치하면 **좌표 기반 추정을 우선** (헤더가 거짓말 하는 경우 많음)
+
+    반환: (scale_to_cm, 감지 정보 문자열)
+    """
+    # 1) 헤더 힌트
+    insunits = doc.header.get("$INSUNITS", 0)
+    header_hint = _INSUNITS_MAP.get(insunits)  # None 또는 (scale, name)
+
+    # 2) 좌표 스케일 추정
+    longest = 0.0
+    try:
+        all_entities = list(doc.modelspace())
+        extents = _ezbbox.extents(all_entities)
+        if extents.has_data:
+            longest = max(
+                extents.extmax.x - extents.extmin.x,
+                extents.extmax.y - extents.extmin.y,
+            )
+    except Exception:
+        pass
+
+    # 의류 패턴 전체 bbox 현실 범위 (가장 긴 변 기준):
+    #   mm → 500~5000 (예: 1500mm = 150cm)
+    #   cm → 30~500   (예: 150cm)
+    #   m  → 0.3~5    (예: 1.5m)
+    #   inch → 20~200 (드묾)
+    if longest >= 500:
+        coord_guess = (0.1, "mm")
+    elif longest >= 30:
+        coord_guess = (1.0, "cm")
+    elif longest >= 0.3:
+        coord_guess = (100.0, "m")
+    else:
+        coord_guess = None
+
+    # 3) 결정
+    if header_hint and coord_guess:
+        if abs(header_hint[0] - coord_guess[0]) < 0.01:
+            return header_hint[0], f"{header_hint[1]} (헤더+좌표 일치)"
+        # 불일치 → 좌표 신뢰
+        return coord_guess[0], f"{coord_guess[1]} (좌표 기준; 헤더 '{header_hint[1]}'는 무시)"
+    if coord_guess:
+        return coord_guess[0], f"{coord_guess[1]} (좌표 기반 추정)"
+    if header_hint:
+        return header_hint[0], f"{header_hint[1]} (헤더 기반)"
+    # 최후 fallback
+    return 0.1, "mm (기본값)"
 
 
 # ╔════════════════════════════════════════════════════════════╗
@@ -603,6 +683,10 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
         style, sample_size = get_style_info_v3(doc)
         size_info = detect_sizes(doc)
 
+        # ── 단위 자동 감지 (mm/cm/inch/m → cm) ──
+        unit_scale, unit_info = detect_unit_scale_to_cm(doc)
+        unit_scale2 = unit_scale * unit_scale  # 면적용 (제곱)
+
         pieces: list[dict] = []
         excluded: list[dict] = []
         pid_counter = 0
@@ -640,20 +724,20 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
 
                 meta = parse_block_metadata_v3(block)
 
-                # 좌표(cm).
-                coords_mm = list(polygon.exterior.coords)
-                coords_cm = [(x * MM_TO_CM, y * MM_TO_CM) for x, y in coords_mm]
+                # 좌표(cm) — 감지된 단위 스케일 적용.
+                coords_raw = list(polygon.exterior.coords)
+                coords_cm = [(x * unit_scale, y * unit_scale) for x, y in coords_raw]
 
                 minx, miny, maxx, maxy = polygon.bounds
                 bbox_cm = (
-                    minx * MM_TO_CM, miny * MM_TO_CM,
-                    maxx * MM_TO_CM, maxy * MM_TO_CM,
+                    minx * unit_scale, miny * unit_scale,
+                    maxx * unit_scale, maxy * unit_scale,
                 )
                 w_cm = bbox_cm[2] - bbox_cm[0]
                 h_cm = bbox_cm[3] - bbox_cm[1]
                 centroid_cm = (
-                    polygon.centroid.x * MM_TO_CM,
-                    polygon.centroid.y * MM_TO_CM,
+                    polygon.centroid.x * unit_scale,
+                    polygon.centroid.y * unit_scale,
                 )
 
                 # 스케일 박스 필터.
@@ -681,7 +765,7 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
                     "material_inferred": material_inf,
                     "annotations": meta["annotations"],
                     "quantity": meta["quantity"],
-                    "area_cm2": polygon.area * MM2_TO_CM2,
+                    "area_cm2": polygon.area * unit_scale2,
                     "width_cm": w_cm,
                     "height_cm": h_cm,
                     "bbox_cm": bbox_cm,
@@ -697,6 +781,8 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
             "sizes": size_info["sizes"],
             "is_full_grading": size_info["is_full_grading"],
             "detection_method": size_info["detection_method"],
+            "unit_info": unit_info,
+            "unit_scale": unit_scale,
             "error": None,
         }
     finally:
@@ -758,7 +844,7 @@ def upload_section() -> dict | None:
     st.caption(
         f"피스 **{len(unique_pieces)}종** × 사이즈 **{len(parsed['sizes'])}개** = "
         f"총 {total_piece_entries}개 엔트리 추출{ex_info}  \n"
-        f"감지 방식: `{parsed['detection_method']}`"
+        f"감지 방식: `{parsed['detection_method']}` · 단위: `{parsed.get('unit_info', '?')}` → cm 기준 계산"
     )
 
     # 재질 분포 (샘플사이즈 또는 첫 사이즈 기준).
