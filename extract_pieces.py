@@ -33,6 +33,23 @@ from shapely.geometry import Polygon
 # explore_dxf.py 의 open_dxf 함수와 DXF_FILE 경로 상수를 그대로 쓴다.
 # → 파일 열기 로직/에러 처리를 한 곳에서만 관리 (DRY 원칙).
 from explore_dxf import open_dxf, DXF_FILE
+from grain_extractor import detect_grain_layer, extract_grain, estimate_grain_from_bbox
+
+
+# ╔════════════════════════════════════════════════════════════╗
+# ║ 식서 LAYER 캐시 (doc 당 1회 식별)                          ║
+# ╚════════════════════════════════════════════════════════════╝
+# extract_piece_info() 가 매 블록마다 doc 전체를 다시 스캔하지 않도록,
+# 모듈 전역에 식서 LAYER 를 캐시한다. main() 또는 다른 진입점에서
+# init_grain_layer(doc) 를 1회 호출해 세팅.
+GRAIN_LAYER: str | None = None
+
+
+def init_grain_layer(doc) -> str | None:
+    """doc 에서 식서 LAYER 를 자동 식별해 모듈 전역에 캐시. 결과 반환."""
+    global GRAIN_LAYER
+    GRAIN_LAYER = detect_grain_layer(doc)
+    return GRAIN_LAYER
 
 
 # ╔════════════════════════════════════════════════════════════╗
@@ -93,12 +110,49 @@ def is_closed_poly(pline) -> bool:
 # ╚════════════════════════════════════════════════════════════╝
 def find_outline(block):
     """
-    블록 안에서 '첫 번째 닫힌 POLYLINE/LWPOLYLINE' 을 찾아 반환.
+    블록 안의 '닫힌 POLYLINE/LWPOLYLINE 중 면적이 가장 큰 것' 을 외곽선으로 반환.
     못 찾으면 None.
+
+    이전 버전(첫 번째 닫힘)은 자켓처럼 LAYER 1(시접 포함) + LAYER 14(net) 가
+    공존하는 DXF 에서 어느 것이 먼저 나오는지 모호. 도메인 규칙상 요척은
+    무조건 시접 포함 외곽선을 써야 하므로 면적 최대를 채택.
     """
+    best = None
+    best_area = -1.0
     for entity in block:
-        if entity.dxftype() in ("POLYLINE", "LWPOLYLINE") and is_closed_poly(entity):
-            return entity
+        if entity.dxftype() not in ("POLYLINE", "LWPOLYLINE"):
+            continue
+        if not is_closed_poly(entity):
+            continue
+        polygon = polyline_to_shapely(entity)
+        if polygon is None:
+            continue
+        if polygon.area > best_area:
+            best_area = polygon.area
+            best = entity
+    return best
+
+
+_MIRROR_TRUE_TOKENS: frozenset = frozenset({"TRUE", "1", "Y", "YES"})
+_MIRROR_FALSE_TOKENS: frozenset = frozenset({"FALSE", "0", "N", "NO", ""})
+
+
+def parse_mirror_value(value: str) -> bool | None:
+    """
+    Mirror 메타 값을 bool 또는 None 으로 정규화.
+      True : "True"/"true"/"TRUE"/"1"/"Y"/"yes"/"Yes"
+      False: "False"/"false"/"FALSE"/"0"/"N"/"no"/"No"/""
+      그 외 → None (불명 → 호출자가 추측 X)
+
+    절대 원칙: 키 자체 부재 또는 인식 불능 값 → 자동 추측 금지 (None 보존).
+    """
+    if value is None:
+        return None
+    token = value.strip().upper()
+    if token in _MIRROR_TRUE_TOKENS:
+        return True
+    if token in _MIRROR_FALSE_TOKENS:
+        return False
     return None
 
 
@@ -112,6 +166,7 @@ def parse_piece_metadata(block) -> dict:
         "size": "",
         "quantity": None,            # int 또는 None
         "material": "",
+        "mirror": None,              # bool 또는 None (불명 — 절대 원칙: 추측 X)
         "recorded_area_cm2": None,   # DXF 자체에 기록된 면적 (검증용)
     }
 
@@ -144,6 +199,8 @@ def parse_piece_metadata(block) -> dict:
                     pass
         elif key == "material":
             meta["material"] = value
+        elif key == "mirror":
+            meta["mirror"] = parse_mirror_value(value)
         elif key == "area":
             # "12.34 sq.cm" → 첫 토큰(숫자) 만 분리 후 float 변환.
             tokens = value.split()
@@ -220,6 +277,10 @@ def extract_piece_info(block, piece_id: str) -> dict | None:
 
     geometry = compute_geometry(polygon)
     metadata = parse_piece_metadata(block)
+    # 식서 추출: 1) DXF LINE 마크 우선, 2) 없으면 bbox 비율로 자동 추정.
+    grain = extract_grain(block, GRAIN_LAYER)
+    if grain is None:
+        grain = estimate_grain_from_bbox(geometry["width_cm"], geometry["height_cm"])
 
     # DXF 기록 면적과 우리가 계산한 면적의 오차(%) 산출.
     area_error_pct = None
@@ -243,6 +304,7 @@ def extract_piece_info(block, piece_id: str) -> dict | None:
         "centroid_cm": geometry["centroid_cm"],
         "recorded_area_cm2": recorded,
         "area_error_pct": area_error_pct,
+        "grain": grain,
     }
 
 
@@ -402,6 +464,10 @@ def main() -> None:
     if doc is None:
         print("[중단] DXF 를 열 수 없어 종료.")
         return
+
+    # 식서 LAYER 1회 식별 → 모듈 전역 GRAIN_LAYER 캐시.
+    detected = init_grain_layer(doc)
+    print(f"[식서 LAYER] 자동 식별 결과: {detected!r}")
 
     # 사용자 블록만 (시스템 블록 * 시작 제외).
     user_blocks = [b for b in doc.blocks if not b.name.startswith("*")]
