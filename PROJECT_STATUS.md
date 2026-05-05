@@ -2,7 +2,45 @@
 
 > 이 파일은 프로젝트의 **단일 진실 공급원(SSOT)**입니다.
 > 변화 있을 때마다 갱신. 클로드 코드도 매 세션 이 파일을 참조.
-> 마지막 갱신: **2026-05-04** (세션 종료 메모 — 다음 세션 재시작 가이드)
+> 마지막 갱신: **2026-05-05** (MMAPS003 슬랙스 13개 매핑 합의 + StyleCAD 매핑 가설)
+
+---
+
+## 2026-05-05 — MMAPS003 슬랙스 13개 매핑 합의 + StyleCAD 매핑 가설
+
+### 합의 사항 (사장님 명시)
+
+1. **슬랙스 13개 부위 한국어→영문 매핑 확정**
+   - 제원단 10개 (SELF) + 안감 3개 (POCKET 2개 + LINING/POCKET TBD 1개)
+   - 명명 컨벤션: 손등=`UPPER` / 손바닥=`BOTTOM`
+   - 마이다데=`FLY_UNDERLAY`, 뎅고제감=`FLY`, 뎅고시다=`FLY_FACING`
+   - 산출물: `data/panel_mapping.json` + `PATTERN_PREP_GUIDE_v2_draft.md` §1.2
+
+2. **StyleCAD ↔ 시스템 매핑 가설** (❓ 검증 대기)
+   - StyleCAD `갯수 1 + 대칭 ✅` → 시스템 `Quantity=2, Mirror=True` (가설)
+   - StyleCAD `갯수 2 + 대칭 ❌` → 시스템 `Quantity=2, Mirror=False` (가설)
+   - StyleCAD `갯수 1 + 대칭 ❌` → 시스템 `Quantity=1, Mirror=False` (가설)
+   - StyleCAD `갯수 N + 대칭 ❌` → 시스템 `Quantity=N, Mirror=False` (가설)
+   - 검증: 사장님이 MMAPS003 export DXF 우리 앱에 업로드 → 진단 리포트 raw 메타로 ✅/❌ 확정
+   - 산출물: `PATTERN_PREP_GUIDE_v2_draft.md` §3.7
+
+3. **사장님 작업 완료**
+   - StyleCAD 에서 MMAPS003 13개 패턴에 표기 설정 완료
+   - DXF export → 우리 앱 업로드 예정 (이번 세션)
+
+### 결정 보류 (다음 세션 또는 검증 후)
+
+- **13번 뎅고 시다 재질**: LINING / POCKET / SELF 중 — 사장님 결정 대기
+- **POCKET vs LINING 코드 통합 여부** (옵션 A/B/C) — 결정 대기
+- **JACKET_COLLAR → COLLAR_OUTER 통일 여부** — v2 §1.2 자켓 어휘집, 결정 대기
+- **commit `850b864` 분리 작업** — atomic commit 정석. 결정 대기
+
+### 다음 단계 (즉시)
+
+1. 사장님이 새 MMAPS003.dxf 우리 앱(http://localhost:8501)에 업로드
+2. 진단 리포트 4계층 (Material / Quantity / Grain / Piece Name) 모두 ✅ 인지 확인
+3. StyleCAD 매핑 가설 (§3.7) ✅/❌ 검증 → `panel_mapping.json` `verification_status` 갱신
+4. 본사 요척서와 마카 결과 비교 (1벌당 yd, 효율 %)
 
 ---
 
