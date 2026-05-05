@@ -136,6 +136,9 @@ def find_outline(block):
 _MIRROR_TRUE_TOKENS: frozenset = frozenset({"TRUE", "1", "Y", "YES"})
 _MIRROR_FALSE_TOKENS: frozenset = frozenset({"FALSE", "0", "N", "NO", ""})
 
+_PAIRED_TRUE_TOKENS: frozenset = frozenset({"DOUBLE", "PAIR", "YES", "Y", "TRUE", "1"})
+_PAIRED_FALSE_TOKENS: frozenset = frozenset({"SINGLE", "NO", "N", "FALSE", "0", ""})
+
 
 def parse_mirror_value(value: str) -> bool | None:
     """
@@ -156,6 +159,23 @@ def parse_mirror_value(value: str) -> bool | None:
     return None
 
 
+def parse_paired_value(value: str) -> bool | None:
+    """
+    PAIRED 메타 값을 mirror bool 로 정규화 (StyleCAD 등 좌우 페어 표기).
+      True : DOUBLE / PAIR / YES — 좌우 페어 piece (원본 + 미러)
+      False: SINGLE / NO — 단일 piece (미러 X)
+      그 외 → None (절대 원칙: 추측 X — 호출자가 미러 적용 안 함)
+    """
+    if value is None:
+        return None
+    token = value.strip().upper()
+    if token in _PAIRED_TRUE_TOKENS:
+        return True
+    if token in _PAIRED_FALSE_TOKENS:
+        return False
+    return None
+
+
 def parse_piece_metadata(block) -> dict:
     """
     블록 내부 TEXT 엔티티를 훑어 메타정보를 dict 로 돌려준다.
@@ -169,6 +189,7 @@ def parse_piece_metadata(block) -> dict:
         "mirror": None,              # bool 또는 None (불명 — 절대 원칙: 추측 X)
         "recorded_area_cm2": None,   # DXF 자체에 기록된 면적 (검증용)
     }
+    paired_seen = False  # PAIRED 키가 이미 mirror 값을 정했는지 — Mirror 키가 덮어쓰지 못하게.
 
     for entity in block:
         if entity.dxftype() != "TEXT":
@@ -199,8 +220,13 @@ def parse_piece_metadata(block) -> dict:
                     pass
         elif key == "material":
             meta["material"] = value
+        elif key == "paired":
+            # StyleCAD 좌우 페어 메타. PAIRED > Mirror 우선순위 — 한 번 박히면 Mirror 키가 덮어쓰지 않음.
+            meta["mirror"] = parse_paired_value(value)
+            paired_seen = True
         elif key == "mirror":
-            meta["mirror"] = parse_mirror_value(value)
+            if not paired_seen:
+                meta["mirror"] = parse_mirror_value(value)
         elif key == "area":
             # "12.34 sq.cm" → 첫 토큰(숫자) 만 분리 후 float 변환.
             tokens = value.split()

@@ -198,11 +198,16 @@ def _split_mirrored_pieces(
 ) -> tuple[list[dict], dict, list[str]]:
     """Mirror=True piece 를 원본·미러 별도 piece 로 분리 (옵션 A).
 
-    [정책 — 사장님 결정 2026-05-04]
+    [정책 — 사장님 결정 2026-05-04, 갱신 2026-05-05]
+      - mirror=True + quantity == 1:
+          "1 pair" 의미 — 사용자가 1을 적었지만 실제로는 좌우 1쌍.
+          원본 piece_id="{pid}_orig" quantity=1,
+          미러 piece_id="{pid}_M"   quantity=1
+          (StyleCAD PAIRED:DOUBLE + Quantity:1 케이스 — 2026-05-05 MMAPS003-test 검증)
       - mirror=True + quantity 짝수 (≥2):
           원본 piece_id="{pid}_orig" quantity=q/2,
           미러 piece_id="{pid}_M"   quantity=q/2
-      - mirror=True + quantity 홀수 또는 q<2:
+      - mirror=True + quantity 홀수 (≥3):
           ⚠️ 경고 + 원본 그대로 (미러 적용 skip — quantity 보존)
       - mirror=False / None:
           기존 동작 유지
@@ -229,23 +234,25 @@ def _split_mirrored_pieces(
             continue
 
         # mirror=True 검증
-        if q < 2:
+        if q == 1:
+            # "1 pair" 케이스 — 사용자가 1을 적었지만 PAIRED 로 좌우 페어 의미
+            half = 1
+        elif q < 1:
             warns.append(
-                f"⚠️ piece {pid} mirror=True 인데 quantity={q} (최소 2 필요). "
+                f"⚠️ piece {pid} mirror=True 인데 quantity={q} (잘못된 값). "
                 f"미러 적용 skip — 원본 quantity 그대로."
             )
             out_pieces.append(p)
             continue
-
-        if q % 2 != 0:
+        elif q % 2 != 0:
             warns.append(
-                f"⚠️ piece {pid} mirror=True 인데 quantity={q} (홀수). "
+                f"⚠️ piece {pid} mirror=True 인데 quantity={q} (홀수, 1 제외). "
                 f"미러 쌍 단위 위반 — 미러 적용 skip, 원본 quantity 그대로."
             )
             out_pieces.append(p)
             continue
-
-        half = q // 2
+        else:
+            half = q // 2
         # 원본 사본 (piece_id 에 "_orig" 접미사) — 결과 분석 시 미러 짝과 구분용
         orig = dict(p)
         orig["piece_id"] = f"{pid}_orig"

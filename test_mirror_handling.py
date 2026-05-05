@@ -319,14 +319,17 @@ class TestSplitMirroredPieces(unittest.TestCase):
         self.assertIn("홀수", warns[0])
 
     def test_case_4b_mirror_quantity_1(self):
-        """Mirror=True + Quantity=1 → ⚠️ 경고 + 미러 skip (q<2)"""
+        """Mirror=True + Quantity=1 → "1 pair" (orig:1 + mirror:1)
+           정책 갱신 2026-05-05: PAIRED:DOUBLE + Quantity:1 (StyleCAD 표기) 지원."""
         p = self._piece("P1", q=1, mirror=True)
         out, _, warns = _split_mirrored_pieces([p], polygons=None)
 
-        self.assertEqual(len(out), 1)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["piece_id"], "P1_orig")
         self.assertEqual(out[0]["quantity"], 1)
-        self.assertEqual(len(warns), 1)
-        self.assertIn("최소 2", warns[0])
+        self.assertEqual(out[1]["piece_id"], "P1_M")
+        self.assertEqual(out[1]["quantity"], 1)
+        self.assertEqual(warns, [])
 
     def test_polygons_dict_mirror(self):
         """polygons (mm shapely Polygon) 도 미러 사본 생성됨."""

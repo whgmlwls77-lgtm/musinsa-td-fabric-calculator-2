@@ -355,6 +355,9 @@ def find_outline_largest(block):
 _MIRROR_TRUE_TOKENS_V3: frozenset = frozenset({"TRUE", "1", "Y", "YES"})
 _MIRROR_FALSE_TOKENS_V3: frozenset = frozenset({"FALSE", "0", "N", "NO", ""})
 
+_PAIRED_TRUE_TOKENS_V3: frozenset = frozenset({"DOUBLE", "PAIR", "YES", "Y", "TRUE", "1"})
+_PAIRED_FALSE_TOKENS_V3: frozenset = frozenset({"SINGLE", "NO", "N", "FALSE", "0", ""})
+
 
 def parse_mirror_value_v3(value: str) -> bool | None:
     """
@@ -369,6 +372,26 @@ def parse_mirror_value_v3(value: str) -> bool | None:
     if token in _MIRROR_TRUE_TOKENS_V3:
         return True
     if token in _MIRROR_FALSE_TOKENS_V3:
+        return False
+    return None
+
+
+def parse_paired_value_v3(value: str) -> bool | None:
+    """
+    PAIRED 메타 값을 mirror bool 로 정규화 (StyleCAD 등 좌우 페어 표기).
+      True : DOUBLE / PAIR / YES — 좌우 페어 piece (원본 + 미러)
+      False: SINGLE / NO — 단일 piece (미러 X)
+      그 외 → None (절대 원칙: 추측 X — 호출자가 미러 적용 안 함)
+
+    근거: TEST 패턴 파일/MMAPS003-test.dxf 에서 사장님이 8 piece 에 PAIRED:DOUBLE 박음.
+          StyleCAD 좌우 페어 메타 — Yuka의 'Mirror:' 와 동일 의미.
+    """
+    if value is None:
+        return None
+    token = value.strip().upper()
+    if token in _PAIRED_TRUE_TOKENS_V3:
+        return True
+    if token in _PAIRED_FALSE_TOKENS_V3:
         return False
     return None
 
@@ -393,6 +416,7 @@ def parse_block_metadata_v3(block) -> dict:
         "mirror": None,           # bool|None — 키 부재 시 None (절대 원칙: 추측 X)
         "annotations": [],
     }
+    paired_seen = False  # PAIRED 키가 이미 mirror 를 정했는지 — Mirror 키가 덮어쓰지 못하게.
 
     for entity in block:
         if entity.dxftype() != "TEXT":
@@ -421,8 +445,13 @@ def parse_block_metadata_v3(block) -> dict:
                     pass
         elif key == "material":
             meta["material"] = value
+        elif key == "paired":
+            # StyleCAD 좌우 페어 메타. PAIRED > Mirror 우선순위.
+            meta["mirror"] = parse_paired_value_v3(value)
+            paired_seen = True
         elif key == "mirror":
-            meta["mirror"] = parse_mirror_value_v3(value)
+            if not paired_seen:
+                meta["mirror"] = parse_mirror_value_v3(value)
         elif key == "annotation":
             if value:
                 meta["annotations"].append(value)
