@@ -396,9 +396,107 @@ def _empty(label: str) -> dict:
     }
 
 
-def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -> dict:
-    """app.py 호출 진입점 — 5가지 진단을 한 번에.
+def build_raw_table(parsed: dict) -> list[dict]:
+    """raw 정보 표 — 항상 표시 (사장님 본질 2026-05-05).
 
+    각 piece 의 핵심 메타 raw 그대로 노출. 추측 X.
+
+    Returns:
+      [
+        {
+          "패턴 명칭": piece_name (정규화된 표준명 또는 raw),
+          "원본 표기": piece_name_raw (raw 그대로),
+          "갯수": quantity (int 또는 "(미표기)"),
+          "좌우 대칭": "✅ 페어" / "단독" / "(미표기)",
+          "원단": material_inferred,
+          "_is_standard_name": bool,
+        },
+        ...
+      ]
+    """
+    rows: list[dict] = []
+    for p in parsed.get("pieces", []):
+        q = p.get("quantity")
+        m = p.get("mirror")
+        rows.append({
+            "패턴 명칭": p.get("piece_name") or "(이름 없음)",
+            "원본 표기": p.get("piece_name_raw") or p.get("piece_name") or "",
+            "갯수": q if q is not None else "(미표기)",
+            "좌우 대칭": ("✅ 페어" if m is True else ("단독" if m is False else "(미표기)")),
+            "원단": p.get("material_inferred") or "(미분류)",
+            "_is_standard_name": bool(p.get("is_standard_name")),
+        })
+    return rows
+
+
+def detect_violations(parsed: dict) -> list[dict]:
+    """위반 알림 — 위반 시만 (사장님 본질 2026-05-05).
+
+    위반 케이스 (협력사 메시지 자동 생성용):
+      - pattern_name_invalid: 표준 어휘집 외 명칭
+      - quantity_missing: 갯수 메타 부재
+      - material_missing: 원단 종류 미표기
+      - grain_missing: 식서 LINE 부재 (Y kind 가 estimated 인 경우)
+
+    Material:NON 은 위반 X — 정보성 표시 (마카 제외 처리됨).
+
+    Returns:
+      [
+        {"type": str, "piece_name": str, "raw_name": str, "detail": str},
+        ...
+      ]
+    """
+    violations: list[dict] = []
+    for p in parsed.get("pieces", []):
+        pn = p.get("piece_name") or "(이름 없음)"
+        raw_pn = p.get("piece_name_raw") or pn
+        is_std = bool(p.get("is_standard_name"))
+
+        # 1) 패턴 명칭 표준 외 — piece_name_raw 가 있을 때만 검증
+        if raw_pn and not is_std:
+            violations.append({
+                "type": "pattern_name_invalid",
+                "piece_name": pn,
+                "raw_name": raw_pn,
+                "detail": f"'{raw_pn}' 표준 어휘집 외 명칭",
+            })
+
+        # 2) 갯수 메타 부재
+        if p.get("quantity") is None:
+            violations.append({
+                "type": "quantity_missing",
+                "piece_name": pn,
+                "raw_name": raw_pn,
+                "detail": "갯수 메타 없음",
+            })
+
+        # 3) 원단 종류 미표기 — material_raw 비어있고 inferred 도 fallback
+        raw_mat = (p.get("material_raw") or p.get("material") or "").strip()
+        if not raw_mat:
+            violations.append({
+                "type": "material_missing",
+                "piece_name": pn,
+                "raw_name": raw_pn,
+                "detail": "원단 종류 표기 없음",
+            })
+
+        # 4) 식서 부재 — grain.estimated == True (LINE 못 찾고 bbox 추정 사용)
+        grain = p.get("grain") or {}
+        if grain.get("estimated"):
+            violations.append({
+                "type": "grain_missing",
+                "piece_name": pn,
+                "raw_name": raw_pn,
+                "detail": "식서 LINE 없음 (bbox 비율 추정)",
+            })
+
+    return violations
+
+
+def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -> dict:
+    """app.py 호출 진입점 (사장님 본질 갱신 2026-05-05).
+
+    기존 5 카테고리 진단 + 새 raw 정보 표 + 위반 알림 통합.
     parsed['diagnosis_raw'] 가 있으면 doc 없이도 동작.
     """
     return {
@@ -407,6 +505,9 @@ def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -
         "panel":    diagnose_panel(parsed),
         "quantity": diagnose_quantity(parsed),
         "excluded": diagnose_excluded(parsed),
+        # 사장님 본질 (2026-05-05) — raw 표 + 위반 알림만
+        "raw_table":  build_raw_table(parsed),
+        "violations": detect_violations(parsed),
     }
 
 
