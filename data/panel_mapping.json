@@ -1,0 +1,31 @@
+{
+  "version": "1.0",
+  "updated_at": "2026-05-05",
+  "source": "사장님 명시 (MMAPS003 정리)",
+  "categories": {
+    "BOTTOMS_SLACKS": {
+      "korean_to_english": {
+        "앞판": {"english": "FRONT_BODY", "material": "SELF"},
+        "뒤판": {"english": "BACK_BODY", "material": "SELF"},
+        "허리단 앞": {"english": "WAISTBAND_FRONT", "material": "SELF"},
+        "허리단 뒤": {"english": "WAISTBAND_BACK", "material": "SELF"},
+        "앞주머니 손등 묵가데": {"english": "FRONT_POCKET_FACING_UPPER", "material": "SELF"},
+        "앞주머니 손바닥 묵가데": {"english": "FRONT_POCKET_FACING_BOTTOM", "material": "SELF"},
+        "마이다데": {"english": "FLY_UNDERLAY", "material": "SELF"},
+        "뎅고제감": {"english": "FLY", "material": "SELF"},
+        "뒤주머니 손등 묵가데": {"english": "BACK_POCKET_FACING_UPPER", "material": "SELF"},
+        "뒤주머니 손바닥 묵가데": {"english": "BACK_POCKET_FACING_BOTTOM", "material": "SELF"},
+        "앞주머니감": {"english": "FRONT_POCKET_BAG", "material": "POCKET"},
+        "뒤주머니감": {"english": "BACK_POCKET_BAG", "material": "POCKET"},
+        "뎅고 시다": {"english": "FLY_FACING", "material": "LINING_OR_POCKET_TBD"}
+      },
+      "stylecad_to_system_mapping": {
+        "count_1_symmetry_true": {"quantity": 2, "mirror": true},
+        "count_2_symmetry_false": {"quantity": 2, "mirror": false},
+        "count_1_symmetry_false": {"quantity": 1, "mirror": false},
+        "count_N_symmetry_false": {"quantity": "N", "mirror": false}
+      },
+      "verification_status": "pending — MMAPS003 검증 대기"
+    }
+  }
+}
