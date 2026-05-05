@@ -499,6 +499,8 @@ def infer_material_v3(
 ) -> str:
     """
     V3.3 (재질 분류 fix):
+      -1. material_raw 가 NON/NONE 이면 무조건 "마카제외" (사장님 결정 2026-05-05)
+          — StyleCAD "마커 제외" export 우회 솔루션
       0. material_raw 가 SELF/1/MAIN 등 명시면 무조건 주원단 (annotations 메모 무시)
       1. ANNOTATION 키워드 — **단어 단위**, 괄호 내용 제외
          (예: '심지부착', '(심지)', 'FUSED' 같은 메모/파생 단어는 매칭 X)
@@ -506,8 +508,12 @@ def infer_material_v3(
       3. DXF material 코드 — 영문(SELF/FUSE/LINING/CONTRAST/POCKET) + 레거시(1/FN/IL)
       4. 기본 → 주원단
     """
-    # 0) material_raw 가 SELF / 주원단 명시면 annotations 메모와 무관하게 주원단
+    # -1) material_raw 가 NON / NONE 이면 마카 제외 (모든 다른 분기보다 우선)
     code = (material_raw or "").strip().upper()
+    if code in ("NON", "NONE"):
+        return "마카제외"
+
+    # 0) material_raw 가 SELF / 주원단 명시면 annotations 메모와 무관하게 주원단
     if code in ("SELF", "1", "MAIN", "FABRIC", "주원단"):
         return "주원단"
 

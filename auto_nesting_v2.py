@@ -88,6 +88,31 @@ def _normalize_polygon(coords: list[tuple[float, float]]) -> tuple[list[tuple[fl
     return [(x - minx, y - miny) for x, y in coords], minx, miny
 
 
+def _filter_excluded_materials(pieces: list[dict]) -> tuple[list[dict], list[str]]:
+    """Material=NON/NONE piece 를 마카 입력에서 제외 (사장님 결정 2026-05-05).
+
+    StyleCAD "마커 제외 ✅" 시 갯수 0 이 DXF Quantity:1 로 강제 변환되어 직접 인식 불가
+    → 우회: Material 값을 "NON" 으로 표기.
+
+    인식 기준 (둘 중 하나):
+      - material_inferred == "마카제외"  (infer_material_v3 결과 — 정상 파이프라인)
+      - material_raw / material upper in {NON, NONE}  (raw DXF 코드 — fallback)
+
+    Returns:
+      (filtered_pieces, excluded_piece_ids)
+    """
+    filtered: list[dict] = []
+    excluded: list[str] = []
+    for p in pieces:
+        raw_mat = (p.get("material_raw") or p.get("material") or "").strip().upper()
+        inferred = (p.get("material_inferred") or "").strip()
+        if inferred == "마카제외" or raw_mat in {"NON", "NONE"}:
+            excluded.append(p.get("piece_id", ""))
+            continue
+        filtered.append(p)
+    return filtered, excluded
+
+
 def _expand_with_mirrors(pieces: list[dict], polygons: dict | None, mirror_each: bool) -> tuple[list[dict], dict, dict[str, int]]:
     """
     nest_grading_marker 와 동일한 미러 확장 로직.
@@ -511,6 +536,9 @@ def nest_pieces_sparrow(
     if effective_grain_mode not in ("1WAY", "2WAY"):
         effective_grain_mode = "2WAY"
 
+    # 0) Material=NON 마카 제외 필터 (사장님 결정 2026-05-05)
+    pieces, excluded_pieces = _filter_excluded_materials(pieces)
+
     # 1) 사이즈 필터
     filtered = pieces
     if sizes_to_nest is not None:
@@ -526,6 +554,7 @@ def nest_pieces_sparrow(
                 "pieces_used": [], "polygons": {} if polygons is not None else None,
                 "runtime_seconds_requested": runtime_seconds,
                 "runtime_actual_sec": 0.0, "svg_content": "",
+                "excluded_pieces": excluded_pieces,
             }
 
     # 2) [폐기됨] 좌우 자동 미러 — quantity 메타 그대로 사용 (절대 원칙).
@@ -541,21 +570,12 @@ def nest_pieces_sparrow(
     mirror_count: dict[str, int] = {p["piece_id"]: 0 for p in expanded_pieces}
     pieces_by_id = {p["piece_id"]: p for p in expanded_pieces}
 
-    # n_lay 적용 — quantity × n_lay = 실제 마카 demand
-    if n_lay > 1:
-        # 새 piece dict 만들어 quantity 곱셈
-        nlay_pieces = []
-        for p in expanded_pieces:
-            q = int(p.get("quantity") or 1)
-            new_p = dict(p)
-            new_p["quantity"] = q * n_lay
-            nlay_pieces.append(new_p)
-        expanded_pieces = nlay_pieces
-        pieces_by_id = {p["piece_id"]: p for p in expanded_pieces}
-
-    # 2.5) Mirror 처리 (옵션 A — 사장님 결정 2026-05-04)
+    # 2.5) Mirror 처리 (옵션 A — 사장님 결정 2026-05-04, 순서 갱신 2026-05-05)
     #      mirror=True piece 를 원본·미러 별도 piece 로 분리해 sparrow 에 전달.
     #      sparrow 는 reflection 미지원이므로 우리 코드가 미러 polygon 생성.
+    #      n_lay 곱셈 BEFORE mirror split 이면 Q=1 paired 가 Q=N 으로 부풀려진 뒤
+    #      "Q/2 + Q/2" 짝수 정책 잘못 적용 → 실제 placements 가 절반으로 떨어짐.
+    #      → mirror split 먼저, n_lay 곱셈 나중 (사장님 raw 92 일치 검증).
     expanded_pieces, expanded_polygons, mirror_warns = _split_mirrored_pieces(
         expanded_pieces,
         expanded_polygons if polygons is not None else None,
@@ -568,6 +588,18 @@ def nest_pieces_sparrow(
         p["piece_id"]: (1 if p["piece_id"].endswith("_M") else 0)
         for p in expanded_pieces
     }
+
+    # n_lay 적용 — quantity × n_lay = 실제 마카 demand (mirror split 이후)
+    if n_lay > 1:
+        # 새 piece dict 만들어 quantity 곱셈
+        nlay_pieces = []
+        for p in expanded_pieces:
+            q = int(p.get("quantity") or 1)
+            new_p = dict(p)
+            new_p["quantity"] = q * n_lay
+            nlay_pieces.append(new_p)
+        expanded_pieces = nlay_pieces
+        pieces_by_id = {p["piece_id"]: p for p in expanded_pieces}
 
     # 3) jagua input 변환 + 매핑 (grain_mode 적용)
     inp, id_to_piece = pieces_to_jagua_input(
@@ -587,6 +619,7 @@ def nest_pieces_sparrow(
             "polygons": expanded_polygons if polygons is not None else None,
             "runtime_seconds_requested": runtime_seconds,
             "runtime_actual_sec": 0.0, "svg_content": "",
+            "excluded_pieces": excluded_pieces,
         }
 
     # 4) tempfile 작업 디렉토리
@@ -638,6 +671,7 @@ def nest_pieces_sparrow(
                 "polygons": expanded_polygons if polygons is not None else None,
                 "runtime_seconds_requested": runtime_seconds,
                 "runtime_actual_sec": 0.0, "svg_content": "",
+                "excluded_pieces": excluded_pieces,
             }
 
         # 6) 결과 파싱 + SVG 읽기
@@ -666,6 +700,7 @@ def nest_pieces_sparrow(
         "runtime_seconds_requested": runtime_seconds,
         "runtime_actual_sec": parsed["runtime_actual_sec"],
         "svg_content": svg_content,
+        "excluded_pieces": excluded_pieces,
     }
 
 
@@ -1083,6 +1118,9 @@ def nest_by_material(
         "total_runtime_sec": float,
       }
     """
+    # 0) Material=NON 마카 제외 필터 (사장님 결정 2026-05-05)
+    pieces, excluded_pieces = _filter_excluded_materials(pieces)
+
     # 1) 사이즈 필터
     filtered = pieces
     if sizes_to_nest is not None:
@@ -1181,6 +1219,7 @@ def nest_by_material(
         "summary_rows": summary_rows,
         "total_runtime_sec": total_rt,
         "materials_ordered": materials_ordered,
+        "excluded_pieces": excluded_pieces,
     }
 
 
@@ -1259,6 +1298,10 @@ def nest_pieces_sparrow_multisize(
       size_ratio           : 입력 그대로
     """
     total_garments = sum(int(v) for v in size_ratio.values() if v)
+
+    # 0) Material=NON 마카 제외 필터 (사장님 결정 2026-05-05)
+    pieces, excluded_pieces = _filter_excluded_materials(pieces)
+
     if total_garments <= 0:
         return {
             "engine": "sparrow",
@@ -1274,6 +1317,7 @@ def nest_pieces_sparrow_multisize(
             "runtime_seconds_requested": runtime_seconds,
             "runtime_actual_sec": 0.0, "svg_content": "",
             "svg_content_humanized": "",
+            "excluded_pieces": excluded_pieces,
         }
 
     # 사이즈별 비율로 expansion — quantity 메타 사용 (좌우 자동 미러 폐기)
@@ -1295,6 +1339,7 @@ def nest_pieces_sparrow_multisize(
             "runtime_seconds_requested": runtime_seconds,
             "runtime_actual_sec": 0.0, "svg_content": "",
             "svg_content_humanized": "",
+            "excluded_pieces": excluded_pieces,
         }
 
     # quantity 메타 그대로 + grain_mode 로 1WAY/2WAY 적용
@@ -1323,6 +1368,8 @@ def nest_pieces_sparrow_multisize(
     res["cm_per_garment"] = cm_per
     res["mirror_count_per_piece"] = mirror_count
     res["sizes_included"] = sorted(size_ratio.keys())
+    # multisize 진입 단계에서 제외된 piece + nest_pieces_sparrow 안에서 제외된 piece 합집합 (중복 제거)
+    res["excluded_pieces"] = sorted(set(res.get("excluded_pieces", []) + excluded_pieces))
     # SVG humanize + 식서 화살표 + 축 라벨 (Bug 2/4 — 2026-05-01)
     humanized = humanize_svg_labels(res.get("svg_content", ""))
     res["svg_content_humanized"] = annotate_marker_svg(
@@ -1351,6 +1398,9 @@ def nest_by_material_multisize(
     재질별 multi-size 마카.
     nest_by_material 과 동일 시그니처에 size_ratio 추가.
     """
+    # 0) Material=NON 마카 제외 필터 (사장님 결정 2026-05-05)
+    pieces, excluded_pieces = _filter_excluded_materials(pieces)
+
     groups, unclassified = group_pieces_by_material(pieces)
 
     by_material: dict[str, dict] = {}
@@ -1439,6 +1489,7 @@ def nest_by_material_multisize(
         "materials_ordered": materials_ordered,
         "size_ratio": size_ratio,
         "total_garments": sum(int(v) for v in size_ratio.values() if v),
+        "excluded_pieces": excluded_pieces,
     }
 
 

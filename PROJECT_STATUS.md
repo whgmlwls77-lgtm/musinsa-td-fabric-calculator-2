@@ -2,7 +2,49 @@
 
 > 이 파일은 프로젝트의 **단일 진실 공급원(SSOT)**입니다.
 > 변화 있을 때마다 갱신. 클로드 코드도 매 세션 이 파일을 참조.
-> 마지막 갱신: **2026-05-05** (MMAPS003 슬랙스 13개 매핑 합의 + StyleCAD 매핑 가설)
+> 마지막 갱신: **2026-05-05** (사용자 피드백 #32 — Material=NON 마카 제외 결정 + PAIRED:DOUBLE issue 7 fix)
+
+---
+
+## 🆕 2026-05-05 — 사용자 피드백 #32 — 마카 제외 = Material=NON 단일 표기 결정
+
+### 배경
+
+- StyleCAD "마커 제외 ✅" 시 갯수 0 → DXF Quantity:1 강제 변환 (raw 검증 — 사장님 캡쳐)
+- StyleCAD 옵션 다이얼로그에 마커 제외 메타 export 옵션 없음 (캡쳐 검증 완료)
+- DXF 표준 어디에도 "마커 제외" 메타 없음 — 시스템 입장에선 일반 piece 와 동일
+
+### 사장님 결정
+
+별도 키 (예: `EXCLUDE_FROM_MARKER`) 신설 X — 기존 `Material` 키 재사용 + 6번째 코드 **`NON`** 신설.
+- 패턴사 입장: 1줄만 추가 (`Material: NON`)
+- 시스템 입장: `infer_material_v3` 가 "마카제외" 분류 → `nest_pieces_sparrow` 4종 자동 skip + `excluded_pieces` 기록
+
+### 코드 변경 (commit 본 세션)
+
+- `app.py infer_material_v3`: -1번째 분기 NON/NONE → "마카제외" (모든 다른 분기보다 우선)
+- `auto_nesting_v2.py _filter_excluded_materials` (신규 helper): material_inferred="마카제외" OR material_raw upper in {NON, NONE} → skip
+- `nest_pieces_sparrow` + `nest_pieces_sparrow_multisize` + `nest_by_material` + `nest_by_material_multisize` 4 함수 진입점에 필터 + 결과 dict `excluded_pieces` 키 추가
+- `dxf_diagnosis.py diagnose_excluded` (신규 카테고리 [5]): 마카 제외 piece 명시 — `run_full_diagnosis` 5계층 진단으로 확장
+- `auto_nesting_v2.py nest_pieces_sparrow` **순서 갱신** — `_split_mirrored_pieces` BEFORE n_lay 곱셈
+  (이전: n_lay 먼저 → Q=1 paired 가 Q=4 부풀려진 뒤 짝수 split 정책 잘못 적용 → placements 절반 손실)
+- `PATTERN_PREP_GUIDE.md §6.1`: 마카 제외 표기 표준 추가
+- `test_material_non_exclusion.py` (신규 13 테스트)
+
+### 검증 (raw 데이터 / 실행 결과)
+
+- MMAPS003-test.dxf DIA30 raw `Material: NON` 확인 (ezdxf audit)
+- 자동 제외 동작: `excluded_pieces=['P012']` (DIA30 piece_id)
+- 마카 placements: **92** (사장님 raw 기대 일치) — 1벌 23 piece × n_lay 4
+- 단위 테스트: 13/13 PASS (NON 분기 + 4종 nest 함수 excluded_pieces 키 + 진단 [5])
+- 전체 테스트 스위트: 57/57 PASS (회귀 0)
+- 28 DXF NON sweep: NON 표기 0건 (MMAPS003-test 만 1건) → 회귀 영향 0
+
+### 폐기된 옵션 (시도했으나 사장님 본질 위반)
+
+- 옵션 C (사용자 수동 선택): 사용자=소싱팀 패턴 모름
+- 옵션 D (자동 객관 판단): 부자재 공통 특징 없음 — 사장님 명시
+- `EXCLUDE_FROM_MARKER` 신설: 영문 약어 남발 — 사장님 본질 위반
 
 ---
 
