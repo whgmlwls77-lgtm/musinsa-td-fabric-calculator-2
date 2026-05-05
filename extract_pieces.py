@@ -183,6 +183,8 @@ def parse_piece_metadata(block) -> dict:
     """
     meta = {
         "piece_name": "",
+        "piece_name_raw": "",        # 원본 그대로 (위반 알림 가독성)
+        "is_standard_name": False,   # 표준 어휘집 매칭 여부 (진단 [위반 알림]용)
         "size": "",
         "quantity": None,            # int 또는 None
         "material": "",
@@ -206,7 +208,16 @@ def parse_piece_metadata(block) -> dict:
         value = value.strip()
 
         if key == "piece name":
-            meta["piece_name"] = value
+            meta["piece_name_raw"] = value
+            try:
+                from piece_name_normalize import normalize_piece_name
+                std, ok = normalize_piece_name(value)
+                meta["piece_name"] = std or value
+                meta["is_standard_name"] = ok
+            except Exception:
+                # 정규화 실패해도 원본은 보존 (절대 원칙: 추측 X)
+                meta["piece_name"] = value
+                meta["is_standard_name"] = False
         elif key == "size":
             meta["size"] = value
         elif key == "quantity":
