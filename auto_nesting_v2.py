@@ -1083,6 +1083,44 @@ def add_axis_labels_to_svg(
     return svg_content.replace("</svg>", axis_block + "\n</svg>")
 
 
+def shrink_piece_labels(svg_content: str, marker_length_cm: float) -> str:
+    """sparrow piece 라벨 폰트 축소 + 영문만 유지 (사장님 본질 2026-05-05 — 본사 컨벤션).
+
+    본사 요척서: piece 라벨 8~10pt 작게, 영문만, 가독성보다 마카 한눈에 우선.
+    sparrow 기본 폰트가 너무 크면 마카가 텍스트로 가려짐 → 마카 길이 비율로 자동 조정.
+    """
+    if not svg_content:
+        return svg_content
+
+    # 권장 폰트 크기 (cm 단위, viewBox 좌표계) — 마카 길이 1.0% (8~10pt 환산)
+    # 마카 100cm → 1.0cm 폰트, 200cm → 2.0cm. 너무 작으면 안 보이고 너무 크면 마카 가림.
+    target_fs = max(0.8, marker_length_cm * 0.010)
+
+    # sparrow 가 생성한 piece 라벨 <text font-size="..."> 패턴 일괄 축소.
+    # 화살표/축 라벨(grain_arrows, axis_labels) g 그룹은 별도 font-size 명시 — 영향 X.
+    def _shrink(m: re.Match) -> str:
+        old = m.group(0)
+        return f'font-size="{target_fs:.2f}"'
+
+    # font-size="N" 또는 font-size="N.N" 모두 매칭
+    return re.sub(r'font-size="[\d.]+(?:px|pt)?"', _shrink, svg_content)
+
+
+def ensure_aspect_preservation(svg_content: str) -> str:
+    """SVG <svg> 태그에 preserveAspectRatio="xMinYMin meet" 추가 (없으면).
+    Streamlit/브라우저 표시 시 마카 가로 비율 보존 — '한눈에' 컨벤션."""
+    if not svg_content:
+        return svg_content
+    if "preserveAspectRatio" in svg_content:
+        return svg_content
+    return re.sub(
+        r'(<svg\b)',
+        r'\1 preserveAspectRatio="xMinYMin meet"',
+        svg_content,
+        count=1,
+    )
+
+
 def annotate_marker_svg(
     svg_content: str,
     placements: list[dict] | None = None,
@@ -1090,8 +1128,13 @@ def annotate_marker_svg(
     marker_length_cm: float | None = None,
 ) -> str:
     """
-    sparrow SVG 에 식서 화살표 + 축 라벨 일괄 추가 (Bug 2/4 통합 후처리).
+    sparrow SVG 에 식서 화살표 + 축 라벨 + 본사 컨벤션 후처리.
     각 인자 None 이면 해당 후처리 skip.
+
+    본사 요척서 컨벤션 (사장님 결정 2026-05-05):
+      - 가로 1줄 마카 (preserveAspectRatio)
+      - 식서 짧은 화살표 (bbox 40%)
+      - piece 라벨 8~10pt 작게 (영문만)
     """
     if not svg_content:
         return svg_content
@@ -1101,6 +1144,10 @@ def annotate_marker_svg(
         svg_content = add_axis_labels_to_svg(
             svg_content, fabric_width_cm, marker_length_cm,
         )
+        # piece 라벨 축소 (마카 길이 기반)
+        svg_content = shrink_piece_labels(svg_content, marker_length_cm)
+    # aspect ratio 보존
+    svg_content = ensure_aspect_preservation(svg_content)
     return svg_content
 
 
