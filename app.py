@@ -498,26 +498,46 @@ def infer_material_v3(
     annotations: list[str],
 ) -> str:
     """
-    V3.3 (재질 분류 fix):
-      -1. material_raw 가 NON/NONE 이면 무조건 "마카제외" (사장님 결정 2026-05-05)
-          — StyleCAD "마커 제외" export 우회 솔루션
-      0. material_raw 가 SELF/1/MAIN 등 명시면 무조건 주원단 (annotations 메모 무시)
-      1. ANNOTATION 키워드 — **단어 단위**, 괄호 내용 제외
-         (예: '심지부착', '(심지)', 'FUSED' 같은 메모/파생 단어는 매칭 X)
-      2. 피스 이름 키워드 — 동일 토큰 매칭
-      3. DXF material 코드 — 영문(SELF/FUSE/LINING/CONTRAST/POCKET) + 레거시(1/FN/IL)
-      4. 기본 → 주원단
+    V4 (사장님 절대 본질 — 2026-05-05):
+      "원단은 사용자(패턴사) 설정 그대로. 패턴명과 별개."
+      → 우선순위 갱신: raw 코드 우선, piece_name 재분류 분기 폐기.
+
+    우선순위:
+      0. material_raw == NON/NONE → "마카제외" (StyleCAD 마커 제외 우회)
+      1. material_raw 코드 (대소문자 무시) — 표준 5종 + 레거시 alias
+         · SELF / 1 / MAIN / FABRIC / 주원단 → 주원단
+         · LINING / IL / INNER LINING / LIN → 안감
+         · POCKETING / POCKET / PK / PKT → 포켓팅
+         · CONTRAST / CONTRAST1 / CONTRAST2... / CT / CONT → 배색
+         · FUSE / FN / FUSING / INTERFACING / INTERLINING → 심지
+      2. annotations 토큰 (괄호 제외) — raw 코드 부재 시만
+      3. piece_name fallback — raw 코드 + annotations 모두 부재 시만 (재분류 X, 키워드 매칭만)
+      4. ⚠️ FALLBACK 주원단 (경고용 — UI 에서 표시)
     """
-    # -1) material_raw 가 NON / NONE 이면 마카 제외 (모든 다른 분기보다 우선)
     code = (material_raw or "").strip().upper()
+
+    # 0) NON / NONE → 마카 제외 (모든 분기보다 우선)
     if code in ("NON", "NONE"):
         return "마카제외"
 
-    # 0) material_raw 가 SELF / 주원단 명시면 annotations 메모와 무관하게 주원단
-    if code in ("SELF", "1", "MAIN", "FABRIC", "주원단"):
-        return "주원단"
+    # 1) Material raw 코드 (1순위 — 사장님 결정 그대로 신뢰)
+    if code:
+        # 표준 5종 + 레거시 alias
+        if code in ("SELF", "1", "MAIN", "FABRIC", "주원단"):
+            return "주원단"
+        if code in ("LINING", "IL", "INNER LINING", "LIN"):
+            return "안감"
+        if code in ("POCKETING", "POCKET", "PK", "PKT"):
+            return "포켓팅"
+        # CONTRAST + 숫자 매김 (CONTRAST1, CONTRAST2, ...) — 사장님 표준
+        if code == "CONTRAST" or code in ("CT", "CONT") \
+                or (code.startswith("CONTRAST") and code[len("CONTRAST"):].isdigit()):
+            return "배색"
+        if code in ("FUSE", "FN", "FUSING", "INTERFACING", "INTERLINING"):
+            return "심지"
+        # 알려지지 않은 raw 코드 → annotations / piece_name fallback 시도
 
-    # 1) ANNOTATION 검사 — 단어 단위, 괄호 제외
+    # 2) ANNOTATIONS — raw 코드 부재 또는 비표준이면 fallback
     if _has_token_in_list(annotations, "안감") or _has_lower_token_in_list(annotations, "lining"):
         return "안감"
     if (_has_token_in_list(annotations, "심지")
@@ -527,46 +547,26 @@ def infer_material_v3(
         return "심지"
     if _has_token_in_list(annotations, "배색") or _has_lower_token_in_list(annotations, "contrast"):
         return "배색"
-    if (_has_token_in_list(annotations, "주머니")
-            or _has_token_in_list(annotations, "포켓")
-            or _has_lower_token_in_list(annotations, "pocket")):
+    if (_has_token_in_list(annotations, "포켓팅")
+            or _has_lower_token_in_list(annotations, "pocketing")):
         return "포켓팅"
 
-    # 2) 피스 이름 키워드 — 동일 토큰 매칭 (괄호 제외)
-    name = piece_name or ""
-    name_lower = name.lower()
-    if (_has_token(name, "심지") or _has_token(name_lower, "fuse")
-            or _has_token(name_lower, "fusing") or _has_token(name_lower, "interfacing")
-            or _has_token(name, "FN") or _has_token(name.upper(), "FN")):
-        return "심지"
-    if _has_token(name, "안감") or _has_token(name_lower, "lining"):
-        return "안감"
-    if _has_token(name, "배색") or _has_token(name_lower, "contrast"):
-        return "배색"
-    if (_has_token(name, "주머니") or _has_token(name, "포켓")
-            or _has_token(name_lower, "pocket")):
-        return "포켓팅"
+    # 3) piece_name fallback — raw + annotations 모두 비었을 때만
+    #    (사장님 본질: 패턴명은 부위명이지 원단명이 아님 — 마지막 fallback 으로만 사용)
+    if not code and not annotations:
+        name = piece_name or ""
+        name_lower = name.lower()
+        if (_has_token(name, "심지") or _has_token(name_lower, "fuse")
+                or _has_token(name_lower, "fusing") or _has_token(name_lower, "interfacing")):
+            return "심지"
+        if _has_token(name, "안감") or _has_token(name_lower, "lining"):
+            return "안감"
+        if _has_token(name, "배색") or _has_token(name_lower, "contrast"):
+            return "배색"
+        # piece_name 의 POCKET/포켓 키워드는 재분류 분기 폐기 — 사용자 설정 raw 우선 원칙
+        # (FRONT_POCKET_BAG 이라는 이름이 'POCKETING' 원단을 의미한다고 추측 X)
 
-    # 3) DXF 재질 코드 — 영문 표준 + 레거시 숫자/약어 모두 지원.
-    code = (material_raw or "").strip().upper()
-
-    # 심지 (Fusing / Interfacing)
-    if code in ("FUSE", "FN", "FUSING", "INTERFACING", "INTERLINING"):
-        return "심지"
-    # 안감 (Lining)
-    if code in ("LINING", "IL", "INNER LINING", "LIN"):
-        return "안감"
-    # 배색 (Contrast)
-    if code in ("CONTRAST", "CT", "CONT"):
-        return "배색"
-    # 포켓팅 (Pocket fabric — 재질 코드로 쓰였을 때)
-    if code in ("POCKETING", "POCKET", "PK", "PKT"):
-        return "포켓팅"
-    # 주원단/제감 (Self / Main)
-    if code in ("SELF", "1", "MAIN", "FABRIC", ""):
-        return "주원단"
-
-    # 알려지지 않은 코드 → 기본값
+    # 4) FALLBACK 주원단 (경고)
     return "주원단"
 
 
