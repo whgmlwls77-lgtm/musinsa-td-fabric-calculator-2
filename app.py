@@ -1450,11 +1450,19 @@ def material_mapping_section(parsed: dict) -> dict:
 # ║ UI — 원단 폭 입력 + 부속원단 (V2 기반)                     ║
 # ╚════════════════════════════════════════════════════════════╝
 def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, float]:
+    """원단 폭 입력 UI — DXF 에 실제 등장하는 원단에만 입력 칸 동적 생성.
+
+    사장님 결정 (2026-05-05):
+      - DXF 에 있는 원단만 입력 (5종 모두 표시 X)
+      - 마카제외(NON) 는 자동 제외 (입력 칸 표시 X)
+      - 수동 원단 추가 UI 폐기 (사용자=소싱팀이 패턴 모름 — 본질 위반)
+    """
     st.markdown("#### 원단 폭")
 
-    # 선택된 사이즈에 등장하는 재질만 입력창 표시.
+    # 선택된 사이즈에 등장하는 재질만 입력창 표시. 마카제외(NON)는 제외.
     relevant = [p for p in pieces if p["size"] in selected_sizes]
     detected = {p["material_inferred"] for p in relevant}
+    detected.discard("마카제외")  # NON 은 마카에서 빠지므로 폭 입력 불필요
     order = ["주원단", "심지", "안감", "배색", "포켓팅"]
 
     widths: dict[str, float] = {}
@@ -1474,6 +1482,7 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
             ))
         col_idx += 1
 
+    # 표준 외 원단 (예: 미분류 표기 등) — 그래도 DXF 에 등장하면 입력
     for mat in sorted(detected - set(order)):
         with cols[col_idx % 2]:
             widths[mat] = float(st.number_input(
@@ -1485,54 +1494,13 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
 
     # v3.3: accessory_fabrics 위젯 영구 제거. 함수(apply_accessory_overrides)는 보존.
     # 사용자가 피스명을 모르므로 피스 단위 선택은 UX 적합하지 않음.
-    # session_state["accessory_fabrics"] 는 빈 리스트로 유지 (apply_accessory_overrides 호환).
     if "accessory_fabrics" not in st.session_state:
         st.session_state.accessory_fabrics = []
 
-    # ── 작업 2: "+ 원단 추가" 버튼 — 자동 감지 못 한 원단 종류 수동 추가 ──
-    # 피스 선택 없이 종류 + 폭만 입력. 해당 종류 코드의 피스가 DXF 에 있어야 사용됨.
+    # 수동 원단 추가 UI 폐기 (사장님 결정 2026-05-05).
+    # session_state.manual_widths 는 빈 dict 유지 (downstream merge 호환).
     if "manual_widths" not in st.session_state:
-        st.session_state.manual_widths = {}  # {재질명: 폭}
-
-    standard = ["배색", "안감", "포켓팅", "심지", "기타"]
-    not_yet = [m for m in standard if m not in detected and m not in st.session_state.manual_widths]
-
-    with st.expander("➕ 원단 추가 (자동 감지 안 된 경우)", expanded=False):
-        st.caption(
-            "패턴에 재질 표기(`Material:` 또는 `Annotation:`)가 빠진 원단을 직접 추가합니다. "
-            "추가 후 해당 종류의 피스가 DXF 에 없으면 무시됩니다."
-        )
-        if not_yet:
-            c1, c2, c3 = st.columns([2, 2, 1])
-            with c1:
-                pick = st.selectbox("원단 종류", options=not_yet, key="add_fabric_kind")
-            with c2:
-                new_w = st.number_input(
-                    "원단 폭 (cm)",
-                    min_value=30, max_value=300,
-                    value=int(DEFAULT_WIDTHS.get(pick, 110)),
-                    step=1, key="add_fabric_width",
-                )
-            with c3:
-                st.write("")  # vertical alignment
-                if st.button("추가", key="add_fabric_btn", type="primary"):
-                    st.session_state.manual_widths[pick] = float(new_w)
-                    st.rerun()
-        else:
-            st.caption("추가 가능한 표준 종류가 없습니다 (모두 자동 감지됨).")
-
-        # 수동 추가 목록
-        if st.session_state.manual_widths:
-            st.write("**수동 추가된 원단**")
-            for mat, w in list(st.session_state.manual_widths.items()):
-                cm1, cm2 = st.columns([4, 1])
-                # DXF 에 해당 종류 피스가 있는지 검증 (소싱팀 안내용)
-                has_pieces = any(p.get("material_inferred") == mat for p in relevant)
-                status = f"✓ DXF 에 피스 있음" if has_pieces else "⚠️ DXF 에 해당 종류 피스 없음 — 무시됨"
-                cm1.write(f"• **{mat}** ({w:.0f}cm) — {status}")
-                if cm2.button("🗑️", key=f"del_manual_{mat}"):
-                    del st.session_state.manual_widths[mat]
-                    st.rerun()
+        st.session_state.manual_widths = {}
 
     # 수동 추가 폭을 widths 에 병합 (자동 감지 폭이 우선, 수동은 미감지 종류만 채움)
     for mat, w in st.session_state.manual_widths.items():
