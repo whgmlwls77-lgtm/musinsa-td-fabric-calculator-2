@@ -1001,6 +1001,8 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
                     "block_name": block_name,
                     "size": size,
                     "piece_name": meta["piece_name"] or "",
+                    "piece_name_raw": meta.get("piece_name_raw") or meta["piece_name"] or "",
+                    "is_standard_name": bool(meta.get("is_standard_name")),
                     "material_raw": meta["material"] or "",
                     "material_inferred": material_inf,
                     "annotations": meta["annotations"],
