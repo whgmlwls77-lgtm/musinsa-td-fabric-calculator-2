@@ -15,9 +15,9 @@
         "뎅고제감": {"english": "FLY", "material": "SELF"},
         "뒤주머니 손등 묵가데": {"english": "BACK_POCKET_FACING_UPPER", "material": "SELF"},
         "뒤주머니 손바닥 묵가데": {"english": "BACK_POCKET_FACING_BOTTOM", "material": "SELF"},
-        "앞주머니감": {"english": "FRONT_POCKET_BAG", "material": "POCKET"},
-        "뒤주머니감": {"english": "BACK_POCKET_BAG", "material": "POCKET"},
-        "뎅고 시다": {"english": "FLY_FACING", "material": "LINING_OR_POCKET_TBD"}
+        "앞주머니감": {"english": "FRONT_POCKET_BAG", "material": "POCKETING"},
+        "뒤주머니감": {"english": "BACK_POCKET_BAG", "material": "POCKETING"},
+        "뎅고 시다": {"english": "FLY_FACING", "material": "LINING_OR_POCKETING_TBD"}
       },
       "stylecad_to_system_mapping": {
         "count_1_symmetry_true": {"quantity": 2, "mirror": true},

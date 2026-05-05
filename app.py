@@ -220,7 +220,7 @@ MATERIAL_COLORS_V2: dict[str, str] = {
     "심지":     "#a0c0e0",
     "안감":     "#f0e090",
     "배색":     "#f4b0c0",
-    "주머니감": "#c0e0a0",
+    "포켓팅": "#c0e0a0",
 }
 DEFAULT_FABRIC_COLOR = "#c0c0c0"
 
@@ -229,7 +229,7 @@ DEFAULT_WIDTHS: dict[str, int] = {
     "심지":     110,
     "안감":     150,
     "배색":     150,
-    "주머니감": 110,
+    "포켓팅": 110,
 }
 
 # 사이즈 정렬용 (표준 의류 사이즈).
@@ -530,7 +530,7 @@ def infer_material_v3(
     if (_has_token_in_list(annotations, "주머니")
             or _has_token_in_list(annotations, "포켓")
             or _has_lower_token_in_list(annotations, "pocket")):
-        return "주머니감"
+        return "포켓팅"
 
     # 2) 피스 이름 키워드 — 동일 토큰 매칭 (괄호 제외)
     name = piece_name or ""
@@ -545,7 +545,7 @@ def infer_material_v3(
         return "배색"
     if (_has_token(name, "주머니") or _has_token(name, "포켓")
             or _has_token(name_lower, "pocket")):
-        return "주머니감"
+        return "포켓팅"
 
     # 3) DXF 재질 코드 — 영문 표준 + 레거시 숫자/약어 모두 지원.
     code = (material_raw or "").strip().upper()
@@ -559,9 +559,9 @@ def infer_material_v3(
     # 배색 (Contrast)
     if code in ("CONTRAST", "CT", "CONT"):
         return "배색"
-    # 주머니감 (Pocket fabric — 재질 코드로 쓰였을 때)
-    if code in ("POCKET", "PK", "PKT"):
-        return "주머니감"
+    # 포켓팅 (Pocket fabric — 재질 코드로 쓰였을 때)
+    if code in ("POCKETING", "POCKET", "PK", "PKT"):
+        return "포켓팅"
     # 주원단/제감 (Self / Main)
     if code in ("SELF", "1", "MAIN", "FABRIC", ""):
         return "주원단"
@@ -575,7 +575,7 @@ def infer_material_v3(
 # ║ 사장님 절대 원칙: DXF Material 0% 시 사용자 입력만 신뢰     ║
 # ╚════════════════════════════════════════════════════════════╝
 MATERIAL_MAPPING_PATH: Path = Path(__file__).parent / "data" / "material_mapping.json"
-MATERIAL_OPTIONS: list[str] = ["주원단", "심지", "안감", "배색", "주머니감", "미지정"]
+MATERIAL_OPTIONS: list[str] = ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]
 
 
 def load_material_mapping() -> dict:
@@ -1091,7 +1091,7 @@ def upload_section() -> dict | None:
         counts: dict[str, int] = {}
         for p in ref_pieces:
             counts[p["material_inferred"]] = counts.get(p["material_inferred"], 0) + 1
-        order = ["주원단", "심지", "안감", "배색", "주머니감"]
+        order = ["주원단", "심지", "안감", "배색", "포켓팅"]
         parts = [f"{m}: {counts[m]}개" for m in order if m in counts]
         extras = sum(c for m, c in counts.items() if m not in order)
         if extras:
@@ -1134,7 +1134,7 @@ def diagnosis_section(parsed: dict) -> None:
     # 4가지 진단 항목 — expander 로 상세 라인.
     labels = [
         ("grain",    "[1] 결방향 (식서/푸서/바이어스)"),
-        ("material", "[2] 원단 표기 (주원단/심지/안감/배색/주머니감)"),
+        ("material", "[2] 원단 표기 (주원단/심지/안감/배색/포켓팅)"),
         ("panel",    "[3] 패널 정보 (앞판/뒤판/사이바 등)"),
         ("quantity", "[4] 수량 / 좌우 대칭"),
     ]
@@ -1265,7 +1265,7 @@ def material_mapping_section(parsed: dict) -> dict:
         mat_counts: dict[str, int] = {}
         for p in pieces:
             mat_counts[p["material_inferred"]] = mat_counts.get(p["material_inferred"], 0) + 1
-        order = ["주원단", "심지", "안감", "배색", "주머니감"]
+        order = ["주원단", "심지", "안감", "배색", "포켓팅"]
         parts = [f"{m}: {mat_counts[m]}" for m in order if m in mat_counts]
         if parts:
             st.caption(" · ".join(parts))
@@ -1356,11 +1356,11 @@ def material_mapping_section(parsed: dict) -> dict:
 
     # ── 예외 처리 expander (piece 단위 override) ─────────────────
     # 같은 약자 그룹이지만 특정 사이즈/piece 만 재질이 다른 경우 사용.
-    # 예: 같은 PKT 약자에 안감용·주머니감용 혼재 / 특정 사이즈만 다른 재질.
+    # 예: 같은 PKT 약자에 안감용·포켓팅용 혼재 / 특정 사이즈만 다른 재질.
     with st.expander("🔧 예외 처리 — 특정 piece 만 다른 재질로 (선택)", expanded=False):
         st.caption(
             "그룹 단위로 일괄 분류된 후 **특정 piece 만** 다른 재질로 override 합니다. "
-            "사용 사례: 같은 약자에 두 재질 혼재(안감용 PKT vs 주머니감용 PKT) / "
+            "사용 사례: 같은 약자에 두 재질 혼재(안감용 PKT vs 포켓팅용 PKT) / "
             "특정 사이즈만 다른 처리."
         )
         # piece 단위 표 형태 — 그룹 정렬 → piece_name 정렬.
@@ -1411,7 +1411,7 @@ def material_mapping_section(parsed: dict) -> dict:
         rev.setdefault(mat, []).append(tok)
 
     summary_parts = []
-    for mat in ["주원단", "심지", "안감", "배색", "주머니감", "미지정"]:
+    for mat in ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]:
         if mat in rev:
             summary_parts.append(f"**{mat}** ({len(rev[mat])}개 부위)")
     if summary_parts:
@@ -1426,7 +1426,7 @@ def material_mapping_section(parsed: dict) -> dict:
         )
 
     with st.expander("📋 부위별 상세 (확인용)"):
-        for mat in ["주원단", "심지", "안감", "배색", "주머니감", "미지정"]:
+        for mat in ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]:
             toks = rev.get(mat)
             if toks:
                 st.markdown(f"- **{mat}** ({len(toks)}개): {', '.join(sorted(toks))}")
@@ -1445,7 +1445,7 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
     # 선택된 사이즈에 등장하는 재질만 입력창 표시.
     relevant = [p for p in pieces if p["size"] in selected_sizes]
     detected = {p["material_inferred"] for p in relevant}
-    order = ["주원단", "심지", "안감", "배색", "주머니감"]
+    order = ["주원단", "심지", "안감", "배색", "포켓팅"]
 
     widths: dict[str, float] = {}
     cols = st.columns(2)
@@ -1484,7 +1484,7 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
     if "manual_widths" not in st.session_state:
         st.session_state.manual_widths = {}  # {재질명: 폭}
 
-    standard = ["배색", "안감", "주머니감", "심지", "기타"]
+    standard = ["배색", "안감", "포켓팅", "심지", "기타"]
     not_yet = [m for m in standard if m not in detected and m not in st.session_state.manual_widths]
 
     with st.expander("➕ 원단 추가 (자동 감지 안 된 경우)", expanded=False):
@@ -1783,7 +1783,7 @@ def _calc_one_size(pieces_one_size, widths, efficiency) -> list[dict]:
     for p in pieces_one_size:
         groups.setdefault(p["material_inferred"], []).append(p)
 
-    base_order = ["주원단", "심지", "안감", "배색", "주머니감"]
+    base_order = ["주원단", "심지", "안감", "배색", "포켓팅"]
     mats_sorted = [m for m in base_order if m in groups]
     mats_sorted += sorted(m for m in groups if m not in base_order)
 

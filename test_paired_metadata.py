@@ -289,11 +289,21 @@ class TestMMAPS003Integration(unittest.TestCase):
             if meta["piece_name"]:
                 results.append(meta)
 
-        # 사장님 raw 데이터 카운트
+        # 사장님 raw 데이터 카운트 (DXF 버전에 따라 갯수 변동 가능 — 동적 검증)
+        # DXF 안에 박힌 PAIRED:DOUBLE 갯수와 일치해야 함
+        import ezdxf as _ez
+        _doc = _ez.readfile(str(self.DXF_PATH))
+        paired_text_count = sum(
+            1
+            for blk in _doc.blocks if not blk.name.startswith(("*", "$"))
+            for e in blk
+            if e.dxftype() == "TEXT" and "PAIRED:" in (e.dxf.text or "").upper()
+            and "DOUBLE" in (e.dxf.text or "").upper()
+        )
         mirror_true_count = sum(1 for m in results if m["mirror"] is True)
         self.assertEqual(
-            mirror_true_count, 8,
-            f"PAIRED:DOUBLE 8개 중 일부 mirror=True 처리 실패: "
+            mirror_true_count, paired_text_count,
+            f"PAIRED:DOUBLE raw {paired_text_count}개 인식 실패: "
             f"실제 mirror=True {mirror_true_count}개. results={results}"
         )
 

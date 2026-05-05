@@ -1135,7 +1135,7 @@ def nest_by_material(
     total_rt = 0.0
 
     # 표시 순서: 표준 재질 우선
-    standard_order = ["주원단", "심지", "안감", "배색", "주머니감"]
+    standard_order = ["주원단", "심지", "안감", "배색", "포켓팅"]
     materials_ordered = [m for m in standard_order if m in groups]
     materials_ordered += sorted(m for m in groups if m not in standard_order)
 
@@ -1406,7 +1406,7 @@ def nest_by_material_multisize(
     by_material: dict[str, dict] = {}
     summary_rows: list[dict] = []
     total_rt = 0.0
-    standard_order = ["주원단", "심지", "안감", "배색", "주머니감"]
+    standard_order = ["주원단", "심지", "안감", "배색", "포켓팅"]
     materials_ordered = [m for m in standard_order if m in groups]
     materials_ordered += sorted(m for m in groups if m not in standard_order)
 
