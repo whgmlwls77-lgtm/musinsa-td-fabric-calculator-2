@@ -31,6 +31,7 @@ from pathlib import Path
 from shapely.geometry import Polygon as ShapelyPolygon
 
 from mirror_pieces import mirror_piece_horizontally
+from grain_extractor import get_alignment_rotation, rotate_polygon
 
 
 # ╔════════════════════════════════════════════════════════════╗
@@ -86,6 +87,59 @@ def _normalize_polygon(coords: list[tuple[float, float]]) -> tuple[list[tuple[fl
     ys = [c[1] for c in coords]
     minx, miny = min(xs), min(ys)
     return [(x - minx, y - miny) for x, y in coords], minx, miny
+
+
+def _align_pieces_to_grain(
+    pieces: list[dict],
+    polygons: dict | None = None,
+) -> tuple[list[dict], dict]:
+    """Phase 2 식서 사전 회전 (사장님 결정 2026-05-05).
+
+    각 piece 의 grain.kind 에 따라 polygon 을 회전해 식서를 Y축으로 통일.
+    sparrow 는 reflection / 임의 회전 처리하므로, 입력 단계에서 식서 정렬해두면
+    grain_mode (1WAY/2WAY) 가 일관되게 적용된다.
+
+    회전:
+      STRAIGHT_GRAIN_X → 90°  (식서 X → Y)
+      STRAIGHT_GRAIN_Y → 0°   (이미 Y, 회전 없음)
+      BIAS / UNKNOWN / NONSTANDARD → 0°  (caller 가 추가 처리)
+
+    Returns: (회전된 pieces, 회전된 polygons)
+
+    근거: "식서 못 읽으면 요척 의미 없음" — 사장님 본질.
+    """
+    out_pieces: list[dict] = []
+    out_polygons: dict = dict(polygons) if polygons else {}
+
+    for p in pieces:
+        rot = get_alignment_rotation(p.get("grain"))
+        if rot == 0.0:
+            out_pieces.append(p)
+            continue
+
+        new_p = dict(p)
+        coords = p.get("coords_cm") or []
+        if coords:
+            new_p["coords_cm"] = rotate_polygon(coords, rot)
+        # grain 메타 갱신 — 회전 후엔 모두 STRAIGHT_GRAIN_Y, 90°
+        old_grain = p.get("grain") or {}
+        new_p["grain"] = {**old_grain, "kind": "STRAIGHT_GRAIN_Y", "angle_deg": 90.0,
+                          "_rotated_by": rot}
+
+        # polygon (mm shapely) 도 동일 회전 적용
+        pid = p.get("piece_id")
+        if pid and polygons and pid in polygons:
+            from shapely import affinity
+            poly = polygons[pid]
+            rotated = affinity.rotate(poly, rot, origin='centroid')
+            # 양의 사분면으로 평행이동
+            minx, miny, _, _ = rotated.bounds
+            rotated = affinity.translate(rotated, -minx, -miny)
+            out_polygons[pid] = rotated
+
+        out_pieces.append(new_p)
+
+    return out_pieces, out_polygons
 
 
 def _filter_excluded_materials(pieces: list[dict]) -> tuple[list[dict], list[str]]:
@@ -538,6 +592,11 @@ def nest_pieces_sparrow(
 
     # 0) Material=NON 마카 제외 필터 (사장님 결정 2026-05-05)
     pieces, excluded_pieces = _filter_excluded_materials(pieces)
+
+    # 0.5) Phase 2 식서 사전 회전 (사장님 결정 2026-05-05)
+    #      "식서 못 읽으면 요척 의미 없음"
+    pieces, polygons_aligned = _align_pieces_to_grain(pieces, polygons)
+    polygons = polygons_aligned if polygons is not None else None
 
     # 1) 사이즈 필터
     filtered = pieces
