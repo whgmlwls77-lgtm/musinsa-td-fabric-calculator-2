@@ -432,6 +432,168 @@ def diagnose_quantity(parsed: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
+# [6] DXF 스케일 검증 — 50x50 비율 박스 (사장님 본질 2026-05-07)
+#
+# 사장님 명시: 50cm × 50cm 정사각형 박스 piece 추가 (Material:NON, 마카 제외).
+# DXF 좌표가 cm 단위로 정확한지 raw 검증 도구.
+#   측정 ≈ 50 cm        → 스케일 정상 ✅
+#   측정 ≈ 19.685 cm    → DXF inch 단위 (×2.54 = 50cm)
+#   측정 ≈ 5 cm         → DXF mm 단위 (×10 = 50cm)
+#   기타                → 사장님 직접 측정 + 보정 결정
+# ──────────────────────────────────────────────
+SCALE_BOX_NAME_KEYWORDS = ("50X50", "50_X_50", "50CM", "SCALE_BOX", "비율박스")
+SCALE_BOX_TARGET_CM = 50.0
+SCALE_BOX_TOLERANCE_CM = 0.5  # ±0.5cm 이내 → 정상으로 판정
+
+
+def detect_scale_box(pieces: list[dict]) -> dict | None:
+    """50x50 비율 박스 piece 검출.
+
+    검출 조건 (모두 충족):
+      1) Material:NON (마카 제외)
+      2) piece_name 에 SCALE_BOX_NAME_KEYWORDS 중 하나 포함
+         OR 정사각형 (|w - h| < 0.5)
+    검출 불가 시 None.
+    """
+    candidates = []
+    for p in pieces:
+        # 마카 제외 piece 만 후보
+        raw = (p.get("material_raw") or p.get("material") or "").strip().upper()
+        inferred = (p.get("material_inferred") or "").strip()
+        is_non = inferred == "마카제외" or raw in {"NON", "NONE"}
+        if not is_non:
+            continue
+
+        nm = (p.get("piece_name") or "").upper()
+        w = float(p.get("width_cm") or 0)
+        h = float(p.get("height_cm") or 0)
+        is_square = w > 0 and abs(w - h) < 0.5
+        name_match = any(kw in nm for kw in SCALE_BOX_NAME_KEYWORDS)
+
+        if name_match or is_square:
+            candidates.append({
+                "piece_id": p.get("piece_id", "?"),
+                "piece_name": p.get("piece_name") or "(empty)",
+                "measured_w_cm": w,
+                "measured_h_cm": h,
+                "name_match": name_match,
+                "is_square": is_square,
+            })
+
+    if not candidates:
+        return None
+
+    # 이름 매칭이 있으면 우선, 없으면 정사각형 중 가장 큰 것
+    name_matched = [c for c in candidates if c["name_match"]]
+    if name_matched:
+        return name_matched[0]
+    candidates.sort(key=lambda c: c["measured_w_cm"], reverse=True)
+    return candidates[0]
+
+
+def compute_scale_correction(measured_cm: float) -> tuple[float, str]:
+    """50cm 박스 측정값 → 보정 비율 + 단위 가설 반환.
+
+    Returns:
+      (correction_ratio, unit_hypothesis)
+      correction_ratio = 1.0 → 보정 불필요 (cm)
+      correction_ratio = 2.54 → DXF 좌표 inch 의심
+      correction_ratio = 10.0 → DXF 좌표 mm 의심
+      etc.
+    """
+    if measured_cm <= 0:
+        return 1.0, "측정 불가"
+    ratio = SCALE_BOX_TARGET_CM / measured_cm
+    # 알려진 단위 비율 매칭 (±5% 허용)
+    if abs(ratio - 1.0) <= 0.01:
+        return 1.0, "cm (정상)"
+    if 2.4 <= ratio <= 2.7:
+        return 2.54, "inch (DXF 좌표 inch — ×2.54 보정 필요)"
+    if 9.5 <= ratio <= 10.5:
+        return 10.0, "mm (DXF 좌표 mm — ×10 보정 필요)"
+    if 90 <= ratio <= 92:
+        return 91.44, "yd (DXF 좌표 yd — 비표준)"
+    return ratio, f"비표준 (×{ratio:.4f} 보정)"
+
+
+def diagnose_scale(parsed: dict) -> dict:
+    """50x50 비율 박스로 DXF 스케일 검증 (사장님 본질 2026-05-07).
+
+    박스 검출 시:
+      - 측정 50.0 ± 0.5 cm → ✅ 스케일 정상
+      - 그 외 → ⚠️ 보정 비율 + 단위 가설 안내 (자동 적용 X)
+    검출 불가 시: ✅ "검증 도구 박스 없음 (협력사 표준 가이드 §X 참고)" — 정보성.
+    """
+    pieces = parsed.get("pieces") or []
+    box = detect_scale_box(pieces)
+
+    if box is None:
+        return {
+            "status": OK,
+            "summary": "스케일 검증 박스 없음 — 50x50cm Material:NON 박스 추가 시 자동 검증 가능.",
+            "dxf_state": "검증 도구 미사용",
+            "algo_state": "스케일 검증 skip",
+            "raw": {"detected": False},
+        }
+
+    w = box["measured_w_cm"]
+    h = box["measured_h_cm"]
+    delta_w = w - SCALE_BOX_TARGET_CM
+    delta_h = h - SCALE_BOX_TARGET_CM
+
+    # 정상 (±0.5cm)
+    if abs(delta_w) <= SCALE_BOX_TOLERANCE_CM and abs(delta_h) <= SCALE_BOX_TOLERANCE_CM:
+        return {
+            "status": OK,
+            "summary": (
+                f"스케일 검증 박스 ({box['piece_name']}) 측정 "
+                f"{w:.3f} × {h:.3f} cm — 50cm 기준 정상 ✅"
+            ),
+            "dxf_state": f"박스 측정: {w:.3f} × {h:.3f} cm (목표 50.0)",
+            "algo_state": "DXF 좌표 cm 단위 정상 — 보정 불필요",
+            "raw": {
+                "detected": True,
+                "piece_name": box["piece_name"],
+                "measured_w_cm": w,
+                "measured_h_cm": h,
+                "delta_w": delta_w,
+                "delta_h": delta_h,
+                "correction_ratio": 1.0,
+                "unit_hypothesis": "cm (정상)",
+            },
+        }
+
+    # 보정 필요 (단위 미스매치 의심)
+    correction, hypothesis = compute_scale_correction(w)
+    return {
+        "status": WARN,
+        "summary": (
+            f"스케일 검증 박스 ({box['piece_name']}) 측정 "
+            f"{w:.3f} × {h:.3f} cm — 50cm 기준 {delta_w:+.3f}cm 갭 ⚠️  "
+            f"단위 의심: {hypothesis}"
+        ),
+        "dxf_state": (
+            f"박스 측정: {w:.3f} × {h:.3f} cm  ·  목표: 50.0 cm  ·  "
+            f"갭: w {delta_w:+.3f} / h {delta_h:+.3f}"
+        ),
+        "algo_state": (
+            f"보정 비율 {correction:.4f}배 — 자동 적용 X (사장님 결정 대기). "
+            f"옵션: ① 코드 자동 보정 / ② 사장님 export 옵션 변경"
+        ),
+        "raw": {
+            "detected": True,
+            "piece_name": box["piece_name"],
+            "measured_w_cm": w,
+            "measured_h_cm": h,
+            "delta_w": delta_w,
+            "delta_h": delta_h,
+            "correction_ratio": correction,
+            "unit_hypothesis": hypothesis,
+        },
+    }
+
+
+# ──────────────────────────────────────────────
 # [5] 마카 제외 piece (Material=NON, 사장님 결정 2026-05-05)
 # ──────────────────────────────────────────────
 def diagnose_excluded(parsed: dict) -> dict:
@@ -593,6 +755,8 @@ def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -
         "panel":    diagnose_panel(parsed),
         "quantity": diagnose_quantity(parsed),
         "excluded": diagnose_excluded(parsed),
+        # 사장님 본질 (2026-05-07) — DXF 스케일 검증 (50x50 비율 박스)
+        "scale":    diagnose_scale(parsed),
         # 사장님 본질 (2026-05-05) — raw 표 + 위반 알림만
         "raw_table":  build_raw_table(parsed),
         "violations": detect_violations(parsed),

@@ -1131,15 +1131,17 @@ def diagnosis_section(parsed: dict) -> None:
 
     style = parsed.get("style") or "(미지정)"
 
-    # 4대 카테고리만 status 카운트 (raw_table/violations 는 list 이므로 제외).
-    _status_keys = ("grain", "material", "panel", "quantity")
+    # 5대 카테고리 status 카운트 (raw_table/violations 는 list 이므로 제외).
+    # 사장님 본질 (2026-05-07): [5] DXF 스케일 검증 추가 — 50x50 박스 절대 기준.
+    _status_keys = ("grain", "material", "panel", "quantity", "scale")
     n_fail = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_FAIL)
     n_warn = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_WARN)
     n_ok = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_OK)
+    n_total = len(_status_keys)
 
     # 헤더 — 한눈 요약.
     if n_fail == 0 and n_warn == 0:
-        head_msg = f"📋 **DXF 진단 리포트** — `{style}`  ✅ 4/4 정상"
+        head_msg = f"📋 **DXF 진단 리포트** — `{style}`  ✅ {n_ok}/{n_total} 정상"
         st.success(head_msg)
     elif n_fail > 0:
         head_msg = f"📋 **DXF 진단 리포트** — `{style}`  ❌ 누락 {n_fail} · ⚠️ 부족 {n_warn} · ✅ 정상 {n_ok}"
@@ -1148,12 +1150,13 @@ def diagnosis_section(parsed: dict) -> None:
         head_msg = f"📋 **DXF 진단 리포트** — `{style}`  ⚠️ 부족 {n_warn} · ✅ 정상 {n_ok}"
         st.warning(head_msg)
 
-    # 4가지 진단 항목 — expander 로 상세 라인.
+    # 진단 항목 — expander 로 상세 라인.
     labels = [
         ("grain",    "[1] 결방향 (식서/푸서/바이어스)"),
         ("material", "[2] 원단 표기 (주원단/안감/포켓팅/배색/논)"),
         ("panel",    "[3] 패널 정보 (앞판/뒤판/사이바 등)"),
         ("quantity", "[4] 수량 / 좌우 대칭"),
+        ("scale",    "[5] DXF 스케일 검증 (50x50 비율 박스)"),
     ]
     with st.expander("상세 진단 보기", expanded=(n_fail + n_warn > 0)):
         for key, label in labels:
