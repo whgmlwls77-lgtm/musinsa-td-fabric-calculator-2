@@ -456,22 +456,26 @@ def diagnose_quantity(parsed: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
-# [6] DXF 스케일 검증 — 50x50 비율 박스 (사장님 본질 2026-05-07)
+# [6] DXF 스케일 검증 — 50cm × 50cm 비율 박스 (사장님 본질 2026-05-07)
 #
 # 사장님 명시: 50cm × 50cm 정사각형 박스 piece 추가 (Material:NON, 마카 제외).
-# DXF 좌표가 cm 단위로 정확한지 raw 검증 도구.
+# 단위 명시 — mm/inch 아님. DXF 좌표가 cm 단위로 정확한지 raw 검증 도구.
 #   측정 ≈ 50 cm        → 스케일 정상 ✅
 #   측정 ≈ 19.685 cm    → DXF inch 단위 (×2.54 = 50cm)
 #   측정 ≈ 5 cm         → DXF mm 단위 (×10 = 50cm)
 #   기타                → 사장님 직접 측정 + 보정 결정
+#
+# 사장님 명시 (2026-05-07 정정): 협력사 혼선 방지 — 모든 표기 "50cm × 50cm".
 # ──────────────────────────────────────────────
-SCALE_BOX_NAME_KEYWORDS = ("50X50", "50_X_50", "50CM", "SCALE_BOX", "비율박스")
-SCALE_BOX_TARGET_CM = 50.0
+SCALE_BOX_NAME_KEYWORDS = ("SCALE_BOX", "50CM_X_50CM", "50CMX50CM", "50CM",
+                          "50X50", "50_X_50", "비율박스", "비율_박스")
+SCALE_BOX_SIZE_CM = 50.0  # 사장님 명시 표준 (단위 명시 — mm/inch 아님)
+SCALE_BOX_TARGET_CM = SCALE_BOX_SIZE_CM  # 후방 호환 alias
 SCALE_BOX_TOLERANCE_CM = 0.5  # ±0.5cm 이내 → 정상으로 판정
 
 
-def detect_scale_box(pieces: list[dict]) -> dict | None:
-    """50x50 비율 박스 piece 검출.
+def detect_scale_box_50cm(pieces: list[dict]) -> dict | None:
+    """50cm × 50cm 비율 박스 piece 검출 (사장님 명시 단위 명시 2026-05-07).
 
     검출 조건 (모두 충족):
       1) Material:NON (마카 제외)
@@ -515,19 +519,22 @@ def detect_scale_box(pieces: list[dict]) -> dict | None:
     return candidates[0]
 
 
-def compute_scale_correction(measured_cm: float) -> tuple[float, str]:
-    """50cm 박스 측정값 → 보정 비율 + 단위 가설 반환.
+# 후방 호환 alias — 기존 호출자 보호 (deprecate 후 제거 예정)
+detect_scale_box = detect_scale_box_50cm
+
+
+def compute_unit_correction_50cm_box(measured_cm: float) -> tuple[float, str]:
+    """50cm × 50cm 박스 측정값 → 보정 비율 + 단위 가설 반환 (사장님 명시 2026-05-07).
 
     Returns:
       (correction_ratio, unit_hypothesis)
       correction_ratio = 1.0 → 보정 불필요 (cm)
       correction_ratio = 2.54 → DXF 좌표 inch 의심
       correction_ratio = 10.0 → DXF 좌표 mm 의심
-      etc.
     """
     if measured_cm <= 0:
         return 1.0, "측정 불가"
-    ratio = SCALE_BOX_TARGET_CM / measured_cm
+    ratio = SCALE_BOX_SIZE_CM / measured_cm
     # 알려진 단위 비율 매칭 (±5% 허용)
     if abs(ratio - 1.0) <= 0.01:
         return 1.0, "cm (정상)"
@@ -540,40 +547,86 @@ def compute_scale_correction(measured_cm: float) -> tuple[float, str]:
     return ratio, f"비표준 (×{ratio:.4f} 보정)"
 
 
+# 후방 호환 alias
+compute_scale_correction = compute_unit_correction_50cm_box
+
+
 def diagnose_scale(parsed: dict) -> dict:
-    """50x50 비율 박스로 DXF 스케일 검증 (사장님 본질 2026-05-07).
+    """50cm × 50cm 비율 박스로 DXF 스케일 검증 (사장님 본질 2026-05-07).
+
+    parsed 에 'scale_correction_applied' / 'scale_correction_ratio' 키가 있으면
+    parse_dxf_v3 가 이미 자동 보정 적용한 상태 → 보정 적용 안내 메시지.
+    그 외에는 raw 박스 검출 + 단위 가설 + 안내.
 
     박스 검출 시:
-      - 측정 50.0 ± 0.5 cm → ✅ 스케일 정상
-      - 그 외 → ⚠️ 보정 비율 + 단위 가설 안내 (자동 적용 X)
-    검출 불가 시: ✅ "검증 도구 박스 없음 (협력사 표준 가이드 §X 참고)" — 정보성.
+      - 측정 50.0 ± 0.5 cm (보정 후) → ✅ 스케일 정상
+      - 보정 적용됨               → ✅ "자동 보정 ×N.NN 적용"
+      - 박스 측정 비정상 + 보정 미적용 → ⚠️
+    검출 불가 시: ✅ "박스 없음 — 협력사 가이드 §비율 검증 박스 참고" — 정보성.
     """
     pieces = parsed.get("pieces") or []
-    box = detect_scale_box(pieces)
+    box = detect_scale_box_50cm(pieces)
+    correction_applied = bool(parsed.get("scale_correction_applied"))
+    correction_ratio = float(parsed.get("scale_correction_ratio") or 1.0)
+    original_w = parsed.get("scale_correction_original_w_cm")
 
     if box is None:
         return {
             "status": OK,
-            "summary": "스케일 검증 박스 없음 — 50x50cm Material:NON 박스 추가 시 자동 검증 가능.",
-            "dxf_state": "검증 도구 미사용",
+            "summary": (
+                "50cm × 50cm 비율 검증 박스 없음 — "
+                "협력사 가이드 §비율 검증 박스 (Piece Name: SCALE_BOX, Material: NON) 추가 시 자동 검증."
+            ),
+            "dxf_state": "검증 도구 미사용 (휴리스틱 단위 추정)",
             "algo_state": "스케일 검증 skip",
             "raw": {"detected": False},
         }
 
     w = box["measured_w_cm"]
     h = box["measured_h_cm"]
-    delta_w = w - SCALE_BOX_TARGET_CM
-    delta_h = h - SCALE_BOX_TARGET_CM
+    delta_w = w - SCALE_BOX_SIZE_CM
+    delta_h = h - SCALE_BOX_SIZE_CM
 
-    # 정상 (±0.5cm)
+    # 자동 보정 적용된 경우 — parse_dxf_v3 가 모든 piece 좌표/사이즈 보정 후 박스 측정도 50cm 근접.
+    if correction_applied and abs(delta_w) <= SCALE_BOX_TOLERANCE_CM:
+        return {
+            "status": OK,
+            "summary": (
+                f"✅ 50cm × 50cm 비율 박스 자동 보정 적용 — "
+                f"보정 비율 ×{correction_ratio:.4f} "
+                f"(원래 측정 {original_w:.3f} cm → 50cm 보정)"
+                if original_w else
+                f"✅ 50cm × 50cm 비율 박스 자동 보정 적용 — 보정 비율 ×{correction_ratio:.4f}"
+            ),
+            "dxf_state": (
+                f"박스 측정 (보정 후): {w:.3f} × {h:.3f} cm  ·  "
+                f"보정 비율: ×{correction_ratio:.4f}"
+                + (f"  ·  원래 측정: {original_w:.3f} cm" if original_w else "")
+            ),
+            "algo_state": "parse_dxf_v3 자동 보정 — 모든 piece 좌표/사이즈/polygon 비율 적용 완료",
+            "raw": {
+                "detected": True,
+                "piece_name": box["piece_name"],
+                "measured_w_cm": w,
+                "measured_h_cm": h,
+                "delta_w": delta_w,
+                "delta_h": delta_h,
+                "correction_ratio": correction_ratio,
+                "correction_applied": True,
+                "original_measured_w_cm": original_w,
+                "unit_hypothesis": "cm (자동 보정 적용)",
+            },
+        }
+
+    # 정상 (±0.5cm) 보정 미적용
     if abs(delta_w) <= SCALE_BOX_TOLERANCE_CM and abs(delta_h) <= SCALE_BOX_TOLERANCE_CM:
         return {
             "status": OK,
             "summary": (
-                f"스케일 검증 박스 ({box['piece_name']}) 측정 "
-                f"{w:.3f} × {h:.3f} cm — 50cm 기준 정상 ✅"
+                f"✅ 50cm × 50cm 비율 박스 ({box['piece_name']}) 측정 "
+                f"{w:.3f} × {h:.3f} cm — 50cm 기준 정상"
             ),
-            "dxf_state": f"박스 측정: {w:.3f} × {h:.3f} cm (목표 50.0)",
+            "dxf_state": f"박스 측정: {w:.3f} × {h:.3f} cm (목표 50cm × 50cm)",
             "algo_state": "DXF 좌표 cm 단위 정상 — 보정 불필요",
             "raw": {
                 "detected": True,
@@ -583,26 +636,27 @@ def diagnose_scale(parsed: dict) -> dict:
                 "delta_w": delta_w,
                 "delta_h": delta_h,
                 "correction_ratio": 1.0,
+                "correction_applied": False,
                 "unit_hypothesis": "cm (정상)",
             },
         }
 
-    # 보정 필요 (단위 미스매치 의심)
-    correction, hypothesis = compute_scale_correction(w)
+    # 보정 필요 (단위 미스매치 의심) — parse_dxf_v3 가 보정 안 한 케이스
+    correction, hypothesis = compute_unit_correction_50cm_box(w)
     return {
         "status": WARN,
         "summary": (
-            f"스케일 검증 박스 ({box['piece_name']}) 측정 "
-            f"{w:.3f} × {h:.3f} cm — 50cm 기준 {delta_w:+.3f}cm 갭 ⚠️  "
+            f"⚠️ 50cm × 50cm 비율 박스 ({box['piece_name']}) 측정 "
+            f"{w:.3f} × {h:.3f} cm — 50cm 기준 {delta_w:+.3f}cm 갭. "
             f"단위 의심: {hypothesis}"
         ),
         "dxf_state": (
-            f"박스 측정: {w:.3f} × {h:.3f} cm  ·  목표: 50.0 cm  ·  "
+            f"박스 측정: {w:.3f} × {h:.3f} cm  ·  목표: 50cm × 50cm  ·  "
             f"갭: w {delta_w:+.3f} / h {delta_h:+.3f}"
         ),
         "algo_state": (
-            f"보정 비율 {correction:.4f}배 — 자동 적용 X (사장님 결정 대기). "
-            f"옵션: ① 코드 자동 보정 / ② 사장님 export 옵션 변경"
+            f"보정 비율 ×{correction:.4f} 자동 적용 가능 (parse_dxf_v3 후처리). "
+            f"휴리스틱 단위 추정 (정확도 ↓) — 박스 보정 권장."
         ),
         "raw": {
             "detected": True,
@@ -612,9 +666,83 @@ def diagnose_scale(parsed: dict) -> dict:
             "delta_w": delta_w,
             "delta_h": delta_h,
             "correction_ratio": correction,
+            "correction_applied": False,
             "unit_hypothesis": hypothesis,
         },
     }
+
+
+# ──────────────────────────────────────────────
+# 자동 보정 적용 (옵션 A — 사장님 결정 2026-05-07)
+# parse_dxf_v3 끝에서 호출. 50cm 박스 검출 → 측정값과 50.0 비교 → 비율 적용.
+# ──────────────────────────────────────────────
+def apply_unit_correction_50cm_box(parsed: dict) -> dict:
+    """50cm × 50cm 비율 박스 측정값으로 모든 piece 좌표/사이즈/polygon 보정.
+
+    호출 흐름 (parse_dxf_v3 내부):
+      1. 박스 검출 (detect_scale_box_50cm)
+      2. 측정값 vs 50cm 비교
+      3. 측정 정상 (±0.5cm) → no-op
+      4. 미스매치 → 모든 piece 의 width/height/area/coords/bbox/centroid × ratio
+         (polygons 는 별도 — caller 가 ShapelyPolygon 재생성)
+
+    단위 가설별 비율 (compute_unit_correction_50cm_box 사용):
+      - 19.685 cm → ×2.54 (inch)
+      - 5.0 cm   → ×10.0 (mm)
+
+    Returns:
+      parsed dict with 추가 키:
+        scale_correction_applied : bool
+        scale_correction_ratio   : float (1.0 if no-op)
+        scale_correction_original_w_cm : float (보정 전 박스 측정값, 보정 시에만)
+        scale_box_info           : dict (검출 박스 info)
+    """
+    pieces = parsed.get("pieces") or []
+    box = detect_scale_box_50cm(pieces)
+    if box is None:
+        parsed["scale_correction_applied"] = False
+        parsed["scale_correction_ratio"] = 1.0
+        return parsed
+
+    measured_w = box["measured_w_cm"]
+    if abs(measured_w - SCALE_BOX_SIZE_CM) <= SCALE_BOX_TOLERANCE_CM:
+        # 측정 정상 — 보정 불필요
+        parsed["scale_correction_applied"] = False
+        parsed["scale_correction_ratio"] = 1.0
+        parsed["scale_box_info"] = box
+        return parsed
+
+    correction, _hypothesis = compute_unit_correction_50cm_box(measured_w)
+
+    # 모든 piece 좌표/사이즈/면적 비율 적용
+    r2 = correction * correction
+    for p in pieces:
+        if p.get("width_cm") is not None:
+            p["width_cm"] = float(p["width_cm"]) * correction
+        if p.get("height_cm") is not None:
+            p["height_cm"] = float(p["height_cm"]) * correction
+        if p.get("area_cm2") is not None:
+            p["area_cm2"] = float(p["area_cm2"]) * r2
+        if p.get("bbox_cm") is not None:
+            p["bbox_cm"] = tuple(float(v) * correction for v in p["bbox_cm"])
+        if p.get("centroid_cm") is not None:
+            p["centroid_cm"] = tuple(float(v) * correction for v in p["centroid_cm"])
+        if p.get("coords_cm") is not None:
+            p["coords_cm"] = [
+                (float(x) * correction, float(y) * correction)
+                for x, y in p["coords_cm"]
+            ]
+
+    # excluded 박스도 보정 (시각화 일관성)
+    for e in parsed.get("excluded") or []:
+        if "bbox_cm" in e and e["bbox_cm"] is not None:
+            e["bbox_cm"] = tuple(float(v) * correction for v in e["bbox_cm"])
+
+    parsed["scale_correction_applied"] = True
+    parsed["scale_correction_ratio"] = correction
+    parsed["scale_correction_original_w_cm"] = measured_w
+    parsed["scale_box_info"] = box
+    return parsed
 
 
 # ──────────────────────────────────────────────

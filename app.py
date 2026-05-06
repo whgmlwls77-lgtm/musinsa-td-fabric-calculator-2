@@ -61,6 +61,7 @@ from grain_extractor import (
 from dxf_diagnosis import (
     run_full_diagnosis,
     build_coop_message,
+    apply_unit_correction_50cm_box,  # 옵션 A 자동 보정 (사장님 결정 2026-05-07)
     STATUS_LABEL,
     STATUS_EMOJI,
     OK as DIAG_OK,
@@ -1020,7 +1021,7 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
                     "grain": grain,
                 })
 
-        return {
+        result = {
             "pieces": pieces,
             "excluded": excluded,
             "style": style,
@@ -1037,6 +1038,13 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
             },
             "error": None,
         }
+
+        # 50cm × 50cm 비율 박스 자동 보정 (옵션 A — 사장님 결정 2026-05-07).
+        # 박스 검출 시 측정값 vs 50cm 비교 → 비율 적용 (모든 piece 좌표/사이즈/polygon).
+        # 박스 없거나 측정 정상이면 no-op.
+        result = apply_unit_correction_50cm_box(result)
+
+        return result
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -1132,7 +1140,7 @@ def diagnosis_section(parsed: dict) -> None:
     style = parsed.get("style") or "(미지정)"
 
     # 5대 카테고리 status 카운트 (raw_table/violations 는 list 이므로 제외).
-    # 사장님 본질 (2026-05-07): [5] DXF 스케일 검증 추가 — 50x50 박스 절대 기준.
+    # 사장님 본질 (2026-05-07): [5] DXF 스케일 검증 추가 — 50cm × 50cm 박스 절대 기준.
     _status_keys = ("grain", "material", "panel", "quantity", "scale")
     n_fail = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_FAIL)
     n_warn = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_WARN)
@@ -1156,7 +1164,7 @@ def diagnosis_section(parsed: dict) -> None:
         ("material", "[2] 원단 표기 (주원단/안감/포켓팅/배색/논)"),
         ("panel",    "[3] 패널 정보 (앞판/뒤판/사이바 등)"),
         ("quantity", "[4] 수량 / 좌우 대칭"),
-        ("scale",    "[5] DXF 스케일 검증 (50x50 비율 박스)"),
+        ("scale",    "[5] DXF 스케일 검증 (50cm × 50cm 비율 박스)"),
     ]
     with st.expander("상세 진단 보기", expanded=(n_fail + n_warn > 0)):
         for key, label in labels:
@@ -1933,7 +1941,7 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
     - 미분류 피스 경고
     - pdf_context 가 있으면 상단에 PDF/Excel 다운로드 버튼 표시
     - hq_match + marker_config 있으면 본사 효율/요척 비교 + 마카 구성 차이 안내
-    - scale_diag (이슈 C 본질 2026-05-07) 있으면 50x50 박스 스케일 검증 결과
+    - scale_diag (이슈 C 본질 2026-05-07) 있으면 50cm × 50cm 박스 스케일 검증 결과
       자동 인용 — 본사 갭 원인 시각화
     """
     by_material = nest_all.get("by_material", {})
@@ -2039,7 +2047,7 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                         f"(갭 {pcs_gap:+d}) — PAIRED/Quantity 메타 검토 필요"
                     )
 
-            # 스케일 검증 결과 안내 (이슈 C 본질 2026-05-07) — 50x50 박스 자동 인용.
+            # 스케일 검증 결과 안내 (이슈 C 본질 2026-05-07) — 50cm × 50cm 박스 자동 인용.
             if scale_diag and scale_diag.get("raw", {}).get("detected"):
                 s_raw = scale_diag["raw"]
                 s_status = scale_diag.get("status")
