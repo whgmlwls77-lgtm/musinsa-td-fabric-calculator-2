@@ -6,6 +6,16 @@ __pycache__/
 output/
 uploads/
 *.dxf
+.streamlit/secrets.toml
+
+# 임시 작업 영역 (logs / scratch) — 커밋 금지
+workspace/
+
+# 사장님 영역 (절대 X — 협력사 raw 데이터 / 본사 검증 자료) → repo 안 박힘
+"요척 자료 데이터"/
+"요척 패턴 데이터"/
+"TEST 패턴 파일"/
+
+# 옛 백업 (이미 삭제, 재발 방지)
 app_v1_backup.py
 app_v2_backup.py
-.streamlit/secrets.toml
