@@ -153,8 +153,9 @@ class TestAnnotateMarkerIntegration(unittest.TestCase):
         self.assertIn("원단 길이방향", out)
         # piece 라벨 폰트 축소
         self.assertIn('font-size="2.00"', out)
-        # aspect ratio 보존
-        self.assertIn('preserveAspectRatio="xMinYMin meet"', out)
+        # aspect ratio 보존 — fit_svg_to_container 가 마지막에 xMidYMid meet 적용
+        # (사장님 이슈 B 본질 2026-05-07: 잘림 방지 중앙 정렬)
+        self.assertIn('preserveAspectRatio="xMidYMid meet"', out)
 
 
 if __name__ == "__main__":

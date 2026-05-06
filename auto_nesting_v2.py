@@ -1010,11 +1010,12 @@ def add_axis_labels_to_svg(
     fs = max(2.5, marker_length_cm * 0.025)
     pad = fs * 1.6  # 라벨 영역 padding
 
-    # 새 viewBox: 좌측·하단·상단 확장
-    new_x = vb_x - pad * 1.5
-    new_y = vb_y - pad * 1.2
-    new_w = vb_w + pad * 1.5 + pad * 0.5
-    new_h = vb_h + pad * 1.2 + pad * 1.6
+    # 새 viewBox: 좌측·우측·상단·하단 모두 확장 (사장님 캡쳐 raw 잘림 방지 2026-05-07).
+    # 외부 화살표/라벨이 viewBox 밖으로 나가지 않도록 padding 강화.
+    new_x = vb_x - pad * 2.0
+    new_y = vb_y - pad * 1.5
+    new_w = vb_w + pad * 2.0 + pad * 1.0  # 좌측 + 우측 여유
+    new_h = vb_h + pad * 1.5 + pad * 2.0  # 상단 + 하단 라벨 여유
 
     new_viewbox = f'viewBox="{new_x:.3f} {new_y:.3f} {new_w:.3f} {new_h:.3f}"'
     svg_content = _SVG_VIEWBOX_RE.sub(new_viewbox, svg_content, count=1)
@@ -1133,15 +1134,16 @@ def ensure_aspect_preservation(svg_content: str) -> str:
 def fit_svg_to_container(svg_content: str) -> str:
     """SVG <svg> 태그에 width="100%" height="100%" + preserveAspectRatio 강제.
 
-    사장님 본질 (이슈 3, 2026-05-06): 가로 스크롤 X — 본사 요척서 컨벤션 한눈에.
+    사장님 본질 (2026-05-06 + 2026-05-07 이슈 B): 가로 스크롤 X + 잘림 X.
 
     sparrow 기본 SVG 는 cm 좌표계 raw width/height (예: `width="180" height="60"`)
     이라 Streamlit iframe(width 700px) 안에서 가로 스크롤 발생. width="100%" 로
     강제하면 iframe 폭에 맞춰 fit, preserveAspectRatio 가 비율 보존.
 
-    iframe height 도 동시에 100% — Streamlit 호출자가 height 동적 지정 시 SVG가
-    iframe 영역에 정확히 채워짐. preserveAspectRatio="xMinYMin meet" 로 좌상단
-    정렬 + aspect 보존 (잘림 X, 빈공간 우/하).
+    preserveAspectRatio="xMidYMid meet" — 중앙 정렬 + aspect 보존 (사장님 명시
+    2026-05-07 이슈 B): 좌상단 (xMinYMin) 보다 잘림 방지 효과 ↑, 외부 화살표/
+    라벨이 가장자리에 있어도 균등 여유로 보호.
+    overflow="visible" — viewBox 밖 콘텐츠도 (있다면) 그려짐.
     """
     if not svg_content:
         return svg_content
@@ -1166,7 +1168,8 @@ def fit_svg_to_container(svg_content: str) -> str:
     new_attrs = attrs_text
     new_attrs = _set_attr(new_attrs, "width", "100%")
     new_attrs = _set_attr(new_attrs, "height", "100%")
-    new_attrs = _set_attr(new_attrs, "preserveAspectRatio", "xMinYMin meet")
+    new_attrs = _set_attr(new_attrs, "preserveAspectRatio", "xMidYMid meet")
+    new_attrs = _set_attr(new_attrs, "overflow", "visible")
 
     return svg_content.replace(m.group(0), f"<svg{new_attrs}>", 1)
 

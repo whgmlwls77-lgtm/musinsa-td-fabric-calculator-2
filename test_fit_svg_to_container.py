@@ -60,8 +60,14 @@ class TestFitSvgToContainer(unittest.TestCase):
         self.assertNotIn('height="60"', out)
 
     def test_adds_preserve_aspect_ratio(self):
+        """사장님 이슈 B (2026-05-07): xMinYMin → xMidYMid meet (잘림 방지 중앙 정렬)."""
         out = fit_svg_to_container(SAMPLE_SVG_RAW)
-        self.assertIn('preserveAspectRatio="xMinYMin meet"', out)
+        self.assertIn('preserveAspectRatio="xMidYMid meet"', out)
+
+    def test_adds_overflow_visible(self):
+        """잘림 방지 — overflow=visible (사장님 이슈 B 본질 2026-05-07)."""
+        out = fit_svg_to_container(SAMPLE_SVG_RAW)
+        self.assertIn('overflow="visible"', out)
 
     def test_idempotent(self):
         once = fit_svg_to_container(SAMPLE_SVG_RAW)
@@ -118,7 +124,7 @@ class TestAnnotateMarkerIntegrationFit(unittest.TestCase):
         # fit 적용 검증
         self.assertIn('width="100%"', out)
         self.assertIn('height="100%"', out)
-        self.assertIn('preserveAspectRatio="xMinYMin meet"', out)
+        self.assertIn('preserveAspectRatio="xMidYMid meet"', out)
         # raw width/height 흔적 X
         first_svg = re.search(r"<svg\b[^>]*>", out).group(0)
         self.assertNotIn('width="200"', first_svg)

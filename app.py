@@ -2205,7 +2205,7 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
         )
 
         # SVG 시각화 (한글 라벨) — 화면에만 표시. 다운로드는 PDF 한 가지로 통합 (작업 5).
-        # iframe 가로 스크롤 X — viewBox 비율 기반 height 자동 (사장님 본질 2026-05-06).
+        # iframe 가로 스크롤 X + 잘림 X (사장님 본질 2026-05-06 + 2026-05-07).
         svg = res.get("svg_content_humanized") or res.get("svg_content", "")
         if svg:
             vb_match = re.search(
@@ -2216,9 +2216,13 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                 vb_w = float(vb_match.group(1))
                 vb_h = float(vb_match.group(2))
                 # 컨테이너 폭 ≈ 700px (Streamlit wide main column) 기준 높이 추정.
-                h_px = max(180, min(900, int(700 * vb_h / vb_w))) if vb_w > 0 else 420
+                # 잘림 방지 마진 ×1.12 — 외부 화살표/라벨이 iframe 영역 밖으로 안 나가도록.
+                h_px = (
+                    max(200, min(960, int(700 * vb_h / vb_w * 1.12)))
+                    if vb_w > 0 else 460
+                )
             else:
-                h_px = 420
+                h_px = 460
             st.components.v1.html(svg, height=h_px, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
