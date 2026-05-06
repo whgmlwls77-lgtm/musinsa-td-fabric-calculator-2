@@ -2048,22 +2048,18 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                     )
 
             # 스케일 검증 결과 안내 (이슈 C 본질 2026-05-07) — 50cm × 50cm 박스 자동 인용.
+            # 사장님 본질 정정 (2026-05-07): 사용자 노출 메시지에 raw 수치/비율/단위 명시 X.
             if scale_diag and scale_diag.get("raw", {}).get("detected"):
-                s_raw = scale_diag["raw"]
                 s_status = scale_diag.get("status")
                 if s_status == DIAG_OK:
                     st.info(
-                        f"💡 **DXF 스케일 검증** ({s_raw.get('piece_name')}): "
-                        f"{s_raw['measured_w_cm']:.2f} × {s_raw['measured_h_cm']:.2f} cm — 정상 ✅. "
-                        "1벌당 요척 갭 원인은 sparrow 알고리즘 또는 본사 다중 사이즈 마카 가능."
+                        "💡 **50cm × 50cm 박스 인식 완료** — 비율 정상.  "
+                        "1벌당 요척 갭은 마카 구성 / sparrow 알고리즘 영향."
                     )
                 else:
                     st.warning(
-                        f"⚠️ **DXF 스케일 미스매치** ({s_raw.get('piece_name')}): "
-                        f"{s_raw['measured_w_cm']:.2f} × {s_raw['measured_h_cm']:.2f} cm "
-                        f"(목표 50.0 cm). 단위 의심: **{s_raw.get('unit_hypothesis')}**. "
-                        f"보정 비율 ×{s_raw.get('correction_ratio', 1):.4f}. "
-                        "이게 본사 갭의 1차 원인일 가능성 — DXF export 옵션 cm 변경 권장."
+                        "⚠️ **50cm × 50cm 박스 비정상** — 박스 표기 재확인 필요.  "
+                        "비율 검증 도구 활성화 시 본사 갭 분석 정확도 ↑."
                     )
 
             # 마카 구성 차이 안내 + 추천

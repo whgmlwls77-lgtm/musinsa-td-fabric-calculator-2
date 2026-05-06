@@ -67,13 +67,19 @@ class TestSourceGrep(unittest.TestCase):
         self.assertIn("delta_color", src)
 
     def test_scale_diag_quoted_in_hq_box(self):
-        """본사 비교 expander 안에 스케일 안내 박스 — 이슈 C 본질."""
+        """본사 비교 expander 안에 스케일 안내 박스 — 이슈 C 본질.
+
+        사장님 본질 정정 (2026-05-07): 사용자 노출 메시지에서 raw 수치/비율/단위 명시 X.
+        새 메시지 = "50cm × 50cm 박스 인식 완료" / "박스 비정상".
+        """
         src = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("DXF 스케일 검증", src)
-        self.assertIn("DXF 스케일 미스매치", src)
-        # 50x50 박스 unit_hypothesis 인용
-        self.assertIn("unit_hypothesis", src)
-        self.assertIn("correction_ratio", src)
+        # 새 메시지 (사장님 본질 정정)
+        self.assertIn("50cm × 50cm 박스 인식", src)
+        self.assertIn("50cm × 50cm 박스 비정상", src)
+        # raw 수치 사용자 노출 X — 옛 패턴이 사라졌는지 검증
+        self.assertNotIn("DXF 스케일 미스매치", src)
+        self.assertNotIn("단위 의심:", src)
+        self.assertNotIn("보정 비율 ×{", src)
 
     def test_caller_passes_scale_diag(self):
         """호출자가 parsed['_diagnosis']['scale'] 을 전달하는지."""

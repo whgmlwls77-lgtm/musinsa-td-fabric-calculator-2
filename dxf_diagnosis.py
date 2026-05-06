@@ -575,10 +575,10 @@ def diagnose_scale(parsed: dict) -> dict:
             "status": OK,
             "summary": (
                 "50cm × 50cm 비율 검증 박스 없음 — "
-                "협력사 가이드 §비율 검증 박스 (Piece Name: SCALE_BOX, Material: NON) 추가 시 자동 검증."
+                "협력사 가이드 §비율 검증 박스 (Piece Name: SCALE_BOX, Material: NON) 추가 시 자동 인식."
             ),
-            "dxf_state": "검증 도구 미사용 (휴리스틱 단위 추정)",
-            "algo_state": "스케일 검증 skip",
+            "dxf_state": "비율 검증 박스 미사용",
+            "algo_state": "박스 추가 권장",
             "raw": {"detected": False},
         }
 
@@ -587,24 +587,16 @@ def diagnose_scale(parsed: dict) -> dict:
     delta_w = w - SCALE_BOX_SIZE_CM
     delta_h = h - SCALE_BOX_SIZE_CM
 
-    # 자동 보정 적용된 경우 — parse_dxf_v3 가 모든 piece 좌표/사이즈 보정 후 박스 측정도 50cm 근접.
+    # 자동 보정 적용된 경우 — parse_dxf_v3 가 모든 piece 좌표/사이즈 보정 완료.
+    # 사장님 본질 정정 (2026-05-07): 사용자 노출 메시지에 raw 수치/비율/단위 명시 X.
     if correction_applied and abs(delta_w) <= SCALE_BOX_TOLERANCE_CM:
         return {
             "status": OK,
-            "summary": (
-                f"✅ 50cm × 50cm 비율 박스 자동 보정 적용 — "
-                f"보정 비율 ×{correction_ratio:.4f} "
-                f"(원래 측정 {original_w:.3f} cm → 50cm 보정)"
-                if original_w else
-                f"✅ 50cm × 50cm 비율 박스 자동 보정 적용 — 보정 비율 ×{correction_ratio:.4f}"
-            ),
-            "dxf_state": (
-                f"박스 측정 (보정 후): {w:.3f} × {h:.3f} cm  ·  "
-                f"보정 비율: ×{correction_ratio:.4f}"
-                + (f"  ·  원래 측정: {original_w:.3f} cm" if original_w else "")
-            ),
-            "algo_state": "parse_dxf_v3 자동 보정 — 모든 piece 좌표/사이즈/polygon 비율 적용 완료",
+            "summary": "✅ 50cm × 50cm 박스 인식 → 자동 보정 완료",
+            "dxf_state": "비율 검증 박스 정상 인식",
+            "algo_state": "자동 보정 완료 — 모든 piece 좌표/사이즈 정합",
             "raw": {
+                # 내부 변수 (디버그/audit 용 — 사용자 노출 X)
                 "detected": True,
                 "piece_name": box["piece_name"],
                 "measured_w_cm": w,
@@ -614,20 +606,16 @@ def diagnose_scale(parsed: dict) -> dict:
                 "correction_ratio": correction_ratio,
                 "correction_applied": True,
                 "original_measured_w_cm": original_w,
-                "unit_hypothesis": "cm (자동 보정 적용)",
             },
         }
 
-    # 정상 (±0.5cm) 보정 미적용
+    # 정상 (±0.5cm) 보정 미적용 — 박스가 처음부터 50cm 인 케이스
     if abs(delta_w) <= SCALE_BOX_TOLERANCE_CM and abs(delta_h) <= SCALE_BOX_TOLERANCE_CM:
         return {
             "status": OK,
-            "summary": (
-                f"✅ 50cm × 50cm 비율 박스 ({box['piece_name']}) 측정 "
-                f"{w:.3f} × {h:.3f} cm — 50cm 기준 정상"
-            ),
-            "dxf_state": f"박스 측정: {w:.3f} × {h:.3f} cm (목표 50cm × 50cm)",
-            "algo_state": "DXF 좌표 cm 단위 정상 — 보정 불필요",
+            "summary": "✅ 50cm × 50cm 박스 정상 인식",
+            "dxf_state": "비율 검증 박스 정상",
+            "algo_state": "보정 불필요",
             "raw": {
                 "detected": True,
                 "piece_name": box["piece_name"],
@@ -637,28 +625,19 @@ def diagnose_scale(parsed: dict) -> dict:
                 "delta_h": delta_h,
                 "correction_ratio": 1.0,
                 "correction_applied": False,
-                "unit_hypothesis": "cm (정상)",
             },
         }
 
-    # 보정 필요 (단위 미스매치 의심) — parse_dxf_v3 가 보정 안 한 케이스
+    # 보정 필요한 경우 — parse_dxf_v3 가 자동 보정 미수행 (드문 케이스).
+    # 사용자 노출 메시지에 raw 수치/단위/비율 명시 X (사장님 본질 정정 2026-05-07).
     correction, hypothesis = compute_unit_correction_50cm_box(w)
     return {
         "status": WARN,
-        "summary": (
-            f"⚠️ 50cm × 50cm 비율 박스 ({box['piece_name']}) 측정 "
-            f"{w:.3f} × {h:.3f} cm — 50cm 기준 {delta_w:+.3f}cm 갭. "
-            f"단위 의심: {hypothesis}"
-        ),
-        "dxf_state": (
-            f"박스 측정: {w:.3f} × {h:.3f} cm  ·  목표: 50cm × 50cm  ·  "
-            f"갭: w {delta_w:+.3f} / h {delta_h:+.3f}"
-        ),
-        "algo_state": (
-            f"보정 비율 ×{correction:.4f} 자동 적용 가능 (parse_dxf_v3 후처리). "
-            f"휴리스틱 단위 추정 (정확도 ↓) — 박스 보정 권장."
-        ),
+        "summary": "⚠️ 50cm × 50cm 박스 측정 비정상 — 자동 보정 미적용",
+        "dxf_state": "비율 검증 박스 인식 실패",
+        "algo_state": "박스 표기 또는 도면 재확인 필요",
         "raw": {
+            # 내부 변수 (디버그/audit 용)
             "detected": True,
             "piece_name": box["piece_name"],
             "measured_w_cm": w,

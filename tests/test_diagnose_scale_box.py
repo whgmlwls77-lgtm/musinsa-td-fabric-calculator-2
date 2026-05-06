@@ -127,15 +127,24 @@ class TestDiagnoseScale(unittest.TestCase):
         self.assertIn("정상", d["summary"])
 
     def test_inch_dxf_warn(self):
-        """사장님 raw 시나리오: 박스 19.685 측정 → WARN + inch 가설."""
+        """사장님 raw 시나리오: 박스 19.685 측정 (보정 미적용) → WARN.
+
+        사장님 본질 정정 (2026-05-07): 사용자 노출 메시지에 raw 수치/단위/비율 명시 X.
+        내부 raw dict 만 unit_hypothesis / correction_ratio 보유 (디버그용).
+        """
         pieces = [
             _piece("P1", "50X50", 19.685, 19.685, mat_raw="NON", mat_inferred="마카제외"),
         ]
         d = diagnose_scale({"pieces": pieces})
         self.assertEqual(d["status"], WARN)
+        # 내부 raw — 디버그/audit 용 (사용자 노출 X)
         self.assertAlmostEqual(d["raw"]["correction_ratio"], 2.54, places=2)
         self.assertIn("inch", d["raw"]["unit_hypothesis"])
-        self.assertIn("19.685", d["summary"])
+        # 사용자 노출 메시지에는 raw 수치 / 단위 / 비율 X
+        self.assertNotIn("19.685", d["summary"])
+        self.assertNotIn("inch", d["summary"])
+        self.assertNotIn("2.54", d["summary"])
+        self.assertNotIn("×", d.get("algo_state", ""))
 
     def test_no_box_returns_ok_info(self):
         pieces = [_piece("P1", "FRONT_BODY", 40, 100)]
