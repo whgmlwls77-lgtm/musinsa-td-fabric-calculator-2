@@ -352,6 +352,8 @@ def diagnose_quantity(parsed: dict) -> dict:
     n_unique_mirror = 0
     qty_dist: dict[str, int] = {}
     per_garment_total = 0
+    # 사장님 본질 (2026-05-07): 재질별 piece 수 분리 — SELF/LINING/합계 명시.
+    per_garment_by_material: dict[str, int] = {}
 
     for p in pieces:
         pk = p.get("piece_key") or p.get("piece_id") or ""
@@ -377,17 +379,34 @@ def diagnose_quantity(parsed: dict) -> dict:
         key = str(q) if q is not None else "None"
         qty_dist[key] = qty_dist.get(key, 0) + 1
 
-        per_garment_total += per_garment_marker_pieces(p)
+        pg = per_garment_marker_pieces(p)
+        per_garment_total += pg
+        if pg > 0:
+            mat_label = inferred_mat or "미지정"
+            per_garment_by_material[mat_label] = (
+                per_garment_by_material.get(mat_label, 0) + pg
+            )
 
     cov = n_with_qty / n_unique if n_unique > 0 else 0.0
     n_classified = n_unique - n_excluded
+
+    # 재질별 분해 라벨 — 표준 5종 우선 정렬 (사장님 본질 2026-05-07).
+    standard_order = ["주원단", "안감", "포켓팅", "배색", "논"]
+    materials_sorted = (
+        [m for m in standard_order if m in per_garment_by_material]
+        + sorted(m for m in per_garment_by_material if m not in standard_order)
+    )
+    by_mat_disp = ", ".join(
+        f"{m} {per_garment_by_material[m]}개" for m in materials_sorted
+    )
 
     if cov >= 1.0:
         status = OK
         summary = (
             f"Quantity 메타 100% ({n_unique}/{n_unique}). "
-            f"PAIRED 처리 후 1벌당 마카 piece: {per_garment_total}개"
-            + (f" (마카제외 {n_excluded}개 제외)" if n_excluded > 0 else "")
+            f"PAIRED 처리 후 1벌당 마카 piece: 합계 {per_garment_total}개"
+            + (f" ({by_mat_disp})" if by_mat_disp else "")
+            + (f" · 마카제외 {n_excluded}개" if n_excluded > 0 else "")
             + "."
         )
     elif cov >= 0.8:
@@ -395,7 +414,9 @@ def diagnose_quantity(parsed: dict) -> dict:
         summary = (
             f"Quantity 메타 {n_with_qty}/{n_unique} ({cov*100:.0f}%). "
             f"누락 piece 는 1로 fallback (좌우 페어 누수 위험). "
-            f"1벌당 마카 piece (추정): {per_garment_total}개."
+            f"1벌당 마카 piece (추정): 합계 {per_garment_total}개"
+            + (f" ({by_mat_disp})" if by_mat_disp else "")
+            + "."
         )
     else:
         status = FAIL
@@ -414,9 +435,10 @@ def diagnose_quantity(parsed: dict) -> dict:
             f"Quantity 보유 {n_with_qty}/{n_unique} · 분포: {qty_disp}"
         ),
         "algo_state": (
-            f"PAIRED 처리 후 1벌당 마카 piece: {per_garment_total}개  "
-            f"(mirror=True {n_unique_mirror}개 / Q=2 페어 {n_unique_pair}개 / "
-            f"None→1 fallback {n_unique - n_with_qty}개)"
+            f"PAIRED 처리 후 1벌당 마카 piece — 합계 {per_garment_total}개"
+            + (f"  ({by_mat_disp})" if by_mat_disp else "")
+            + f"  ·  mirror=True {n_unique_mirror}개 / Q=2 페어 {n_unique_pair}개 / "
+            f"None→1 fallback {n_unique - n_with_qty}개"
         ),
         "raw": {
             "qty_coverage": cov,
@@ -427,6 +449,8 @@ def diagnose_quantity(parsed: dict) -> dict:
             "n_excluded": n_excluded,
             "n_mirror_true": n_unique_mirror,
             "per_garment_marker_pieces": per_garment_total,
+            # 재질별 분해 (SELF/LINING/etc) — 사장님 본질 2026-05-07.
+            "per_garment_by_material": per_garment_by_material,
         },
     }
 
