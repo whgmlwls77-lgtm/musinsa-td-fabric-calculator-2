@@ -108,7 +108,14 @@ def diagnose_grain(parsed: dict, doc=None, grain_layer: str | None = None) -> di
 # ──────────────────────────────────────────────
 # [2] 원단 표기
 # ──────────────────────────────────────────────
-_MATERIAL_KEYWORDS = ["안감", "심지", "배색", "주머니", "주원단", "메인", "MAIN", "CONTRAST"]
+# 사장님 표준 5종 (2026-05-06): 주원단 / 안감 / 포켓팅 / 배색 / 논. "심지" 폐기.
+_MATERIAL_KEYWORDS = [
+    "주원단", "메인", "MAIN", "SELF",
+    "안감", "LINING",
+    "포켓팅", "포켓", "주머니", "POCKETING", "POCKET",
+    "배색", "CONTRAST",
+    "논", "NON",
+]
 
 
 def diagnose_material(parsed: dict) -> dict:
@@ -602,8 +609,9 @@ def build_coop_message(parsed: dict, diag: dict) -> str:
 
     if diag["material"]["status"] in (WARN, FAIL):
         items.append(
-            "1. **Material 코드** (SELF / FUSE / LINING / CONTRAST / POCKET) — "
-            "모든 piece 의 Block ATTDEF 에 `Material:` 키로 표준 코드 표기 필요."
+            "1. **Material 코드** (SELF / LINING / POCKETING / CONTRAST / NON) — "
+            "모든 piece 의 Block ATTDEF 에 `Material:` 키로 표준 코드 표기 필요. "
+            "NON 은 마카 제외 piece (예: 표시·도식)."
         )
     if diag["panel"]["status"] in (WARN, FAIL):
         d = diag["panel"]["raw"]

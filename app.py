@@ -216,20 +216,21 @@ plt.rcParams["font.family"] = ["Noto Sans KR", "AppleGothic", "sans-serif"]
 plt.rcParams["axes.unicode_minus"] = False
 
 MATERIAL_COLORS_V2: dict[str, str] = {
+    # 사장님 표준 5종 (2026-05-06): 주원단 / 안감 / 포켓팅 / 배색 / 논
     "주원단":   "#d0d0d0",
-    "심지":     "#a0c0e0",
     "안감":     "#f0e090",
+    "포켓팅":   "#c0e0a0",
     "배색":     "#f4b0c0",
-    "포켓팅": "#c0e0a0",
+    "논":       "#e8e8e8",  # 마카제외 (NON) — 옅은 회색
 }
 DEFAULT_FABRIC_COLOR = "#c0c0c0"
 
 DEFAULT_WIDTHS: dict[str, int] = {
     "주원단":   150,
-    "심지":     110,
     "안감":     150,
+    "포켓팅":   110,
     "배색":     150,
-    "포켓팅": 110,
+    "논":       0,  # 마카 제외 — 폭 무관
 }
 
 # 사이즈 정렬용 (표준 의류 사이즈).
@@ -585,7 +586,9 @@ def infer_material_v3(
 # ║ 사장님 절대 원칙: DXF Material 0% 시 사용자 입력만 신뢰     ║
 # ╚════════════════════════════════════════════════════════════╝
 MATERIAL_MAPPING_PATH: Path = Path(__file__).parent / "data" / "material_mapping.json"
-MATERIAL_OPTIONS: list[str] = ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]
+# 사장님 표준 5종 (2026-05-06): 주원단 / 안감 / 포켓팅 / 배색 / 논 + 미지정.
+# "심지" 폐기 — 사용자 노출 라벨 표준 외.
+MATERIAL_OPTIONS: list[str] = ["주원단", "안감", "포켓팅", "배색", "논", "미지정"]
 
 
 def load_material_mapping() -> dict:
@@ -1103,7 +1106,7 @@ def upload_section() -> dict | None:
         counts: dict[str, int] = {}
         for p in ref_pieces:
             counts[p["material_inferred"]] = counts.get(p["material_inferred"], 0) + 1
-        order = ["주원단", "심지", "안감", "배색", "포켓팅"]
+        order = ["주원단", "안감", "포켓팅", "배색", "논"]
         parts = [f"{m}: {counts[m]}개" for m in order if m in counts]
         extras = sum(c for m, c in counts.items() if m not in order)
         if extras:
@@ -1148,7 +1151,7 @@ def diagnosis_section(parsed: dict) -> None:
     # 4가지 진단 항목 — expander 로 상세 라인.
     labels = [
         ("grain",    "[1] 결방향 (식서/푸서/바이어스)"),
-        ("material", "[2] 원단 표기 (주원단/심지/안감/배색/포켓팅)"),
+        ("material", "[2] 원단 표기 (주원단/안감/포켓팅/배색/논)"),
         ("panel",    "[3] 패널 정보 (앞판/뒤판/사이바 등)"),
         ("quantity", "[4] 수량 / 좌우 대칭"),
     ]
@@ -1279,7 +1282,7 @@ def material_mapping_section(parsed: dict) -> dict:
         mat_counts: dict[str, int] = {}
         for p in pieces:
             mat_counts[p["material_inferred"]] = mat_counts.get(p["material_inferred"], 0) + 1
-        order = ["주원단", "심지", "안감", "배색", "포켓팅"]
+        order = ["주원단", "안감", "포켓팅", "배색", "논"]
         parts = [f"{m}: {mat_counts[m]}" for m in order if m in mat_counts]
         if parts:
             st.caption(" · ".join(parts))
@@ -1425,7 +1428,7 @@ def material_mapping_section(parsed: dict) -> dict:
         rev.setdefault(mat, []).append(tok)
 
     summary_parts = []
-    for mat in ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]:
+    for mat in ["주원단", "안감", "포켓팅", "배색", "논", "미지정"]:
         if mat in rev:
             summary_parts.append(f"**{mat}** ({len(rev[mat])}개 부위)")
     if summary_parts:
@@ -1440,7 +1443,7 @@ def material_mapping_section(parsed: dict) -> dict:
         )
 
     with st.expander("📋 부위별 상세 (확인용)"):
-        for mat in ["주원단", "심지", "안감", "배색", "포켓팅", "미지정"]:
+        for mat in ["주원단", "안감", "포켓팅", "배색", "논", "미지정"]:
             toks = rev.get(mat)
             if toks:
                 st.markdown(f"- **{mat}** ({len(toks)}개): {', '.join(sorted(toks))}")
@@ -1467,7 +1470,7 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
     relevant = [p for p in pieces if p["size"] in selected_sizes]
     detected = {p["material_inferred"] for p in relevant}
     detected.discard("마카제외")  # NON 은 마카에서 빠지므로 폭 입력 불필요
-    order = ["주원단", "심지", "안감", "배색", "포켓팅"]
+    order = ["주원단", "안감", "포켓팅", "배색", "논"]
 
     widths: dict[str, float] = {}
     cols = st.columns(2)
@@ -1765,7 +1768,7 @@ def _calc_one_size(pieces_one_size, widths, efficiency) -> list[dict]:
     for p in pieces_one_size:
         groups.setdefault(p["material_inferred"], []).append(p)
 
-    base_order = ["주원단", "심지", "안감", "배색", "포켓팅"]
+    base_order = ["주원단", "안감", "포켓팅", "배색", "논"]
     mats_sorted = [m for m in base_order if m in groups]
     mats_sorted += sorted(m for m in groups if m not in base_order)
 

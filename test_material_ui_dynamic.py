@@ -40,8 +40,9 @@ class TestWidthSectionLogic(unittest.TestCase):
         self.assertNotIn("마카제외", detected)
 
     def test_only_detected_materials_in_widths(self):
-        """주원단/안감만 detected → 표시 순서대로 widths dict 에"""
-        order = ["주원단", "심지", "안감", "배색", "포켓팅"]
+        """주원단/안감만 detected → 표시 순서대로 widths dict 에 (사장님 표준 5종)"""
+        # 사장님 결정 (2026-05-06): 표준 5종 = 주원단/안감/포켓팅/배색/논 — '심지' 폐기
+        order = ["주원단", "안감", "포켓팅", "배색", "논"]
         detected = {"주원단", "안감"}
         widths = {}
         for mat in order:
