@@ -1926,12 +1926,15 @@ def nesting_results_section(
 # ╚════════════════════════════════════════════════════════════╝
 def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                              hq_match: dict | None = None,
-                             marker_config: dict | None = None) -> None:
+                             marker_config: dict | None = None,
+                             scale_diag: dict | None = None) -> None:
     """nest_by_material 결과를 재질별 카드 + 총합 표로 표시.
     - 재질당 1개 마카 (한글 라벨 SVG)
     - 미분류 피스 경고
     - pdf_context 가 있으면 상단에 PDF/Excel 다운로드 버튼 표시
     - hq_match + marker_config 있으면 본사 효율/요척 비교 + 마카 구성 차이 안내
+    - scale_diag (이슈 C 본질 2026-05-07) 있으면 50x50 박스 스케일 검증 결과
+      자동 인용 — 본사 갭 원인 시각화
     """
     by_material = nest_all.get("by_material", {})
     summary_rows = nest_all.get("summary_rows", [])
@@ -2034,6 +2037,25 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                     st.warning(
                         f"⚠️ 1벌당 piece 수 갭: 우리 {our_pieces} vs 본사 {hq_pieces} "
                         f"(갭 {pcs_gap:+d}) — PAIRED/Quantity 메타 검토 필요"
+                    )
+
+            # 스케일 검증 결과 안내 (이슈 C 본질 2026-05-07) — 50x50 박스 자동 인용.
+            if scale_diag and scale_diag.get("raw", {}).get("detected"):
+                s_raw = scale_diag["raw"]
+                s_status = scale_diag.get("status")
+                if s_status == DIAG_OK:
+                    st.info(
+                        f"💡 **DXF 스케일 검증** ({s_raw.get('piece_name')}): "
+                        f"{s_raw['measured_w_cm']:.2f} × {s_raw['measured_h_cm']:.2f} cm — 정상 ✅. "
+                        "1벌당 요척 갭 원인은 sparrow 알고리즘 또는 본사 다중 사이즈 마카 가능."
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ **DXF 스케일 미스매치** ({s_raw.get('piece_name')}): "
+                        f"{s_raw['measured_w_cm']:.2f} × {s_raw['measured_h_cm']:.2f} cm "
+                        f"(목표 50.0 cm). 단위 의심: **{s_raw.get('unit_hypothesis')}**. "
+                        f"보정 비율 ×{s_raw.get('correction_ratio', 1):.4f}. "
+                        "이게 본사 갭의 1차 원인일 가능성 — DXF export 옵션 cm 변경 권장."
                     )
 
             # 마카 구성 차이 안내 + 추천
@@ -2187,7 +2209,21 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                           f"{row['marker_length_yd']:.2f} yd",
                           f"{row['marker_length_cm']:.1f} cm")
         with c3:
-            st.metric("효율", f"{row['efficiency_pct']:.1f} %")
+            # 효율 metric — 본사 비교 delta 표시 (이슈 C 본질 2026-05-07).
+            # 주원단 마카만 본사 비교 가능 (소재별 본사 raw 보유 한정).
+            eff_pct = row["efficiency_pct"]
+            is_main = row["material"] == "주원단"
+            hq_eff = safe_float(hq_match.get("효율_pct")) if (is_main and hq_match) else 0.0
+            if hq_eff > 0:
+                gap = eff_pct - hq_eff
+                verdict = "✓ 능가" if gap >= 0 else "⚠ 미달"
+                st.metric(
+                    "효율", f"{eff_pct:.1f} %",
+                    f"본사 {hq_eff:.2f}% 대비 {gap:+.2f}p {verdict}",
+                    delta_color=("normal" if gap >= 0 else "inverse"),
+                )
+            else:
+                st.metric("효율", f"{eff_pct:.1f} %")
         with c4:
             # 새 라벨 통일 (사장님 명시):
             #   "마카 갯수" = 마카에 실제 깔린 모든 피스 수 (= n_total × tg)
@@ -3307,8 +3343,10 @@ def main() -> None:
             "runtime_seconds_used": opts["runtime_seconds"],
             "marker_config": marker_config,
         }
+        scale_diag_for_results = (parsed.get("_diagnosis") or {}).get("scale")
         material_results_section(nv["result"], pdf_context=pdf_context, hq_match=hq_match,
-                                 marker_config=marker_config)
+                                 marker_config=marker_config,
+                                 scale_diag=scale_diag_for_results)
     return  # v3.3 일직선 흐름 — efficiency_section 경로 폐기
 
     # ── [보존, 호출 안 됨] 구 v3.1 효율 슬라이더 경로 — regression_test 가 직접 호출 ──
