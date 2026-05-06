@@ -907,7 +907,7 @@ def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -
         "panel":    diagnose_panel(parsed),
         "quantity": diagnose_quantity(parsed),
         "excluded": diagnose_excluded(parsed),
-        # 사장님 본질 (2026-05-07) — DXF 스케일 검증 (50x50 비율 박스)
+        # 사장님 본질 (2026-05-07) — DXF 스케일 검증 (50cm × 50cm 비율 박스)
         "scale":    diagnose_scale(parsed),
         # 사장님 본질 (2026-05-05) — raw 표 + 위반 알림만
         "raw_table":  build_raw_table(parsed),
