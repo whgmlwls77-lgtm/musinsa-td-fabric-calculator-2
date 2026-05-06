@@ -1121,6 +1121,47 @@ def ensure_aspect_preservation(svg_content: str) -> str:
     )
 
 
+def fit_svg_to_container(svg_content: str) -> str:
+    """SVG <svg> 태그에 width="100%" height="100%" + preserveAspectRatio 강제.
+
+    사장님 본질 (이슈 3, 2026-05-06): 가로 스크롤 X — 본사 요척서 컨벤션 한눈에.
+
+    sparrow 기본 SVG 는 cm 좌표계 raw width/height (예: `width="180" height="60"`)
+    이라 Streamlit iframe(width 700px) 안에서 가로 스크롤 발생. width="100%" 로
+    강제하면 iframe 폭에 맞춰 fit, preserveAspectRatio 가 비율 보존.
+
+    iframe height 도 동시에 100% — Streamlit 호출자가 height 동적 지정 시 SVG가
+    iframe 영역에 정확히 채워짐. preserveAspectRatio="xMinYMin meet" 로 좌상단
+    정렬 + aspect 보존 (잘림 X, 빈공간 우/하).
+    """
+    if not svg_content:
+        return svg_content
+
+    m = re.search(r"<svg\b([^>]*)>", svg_content, re.IGNORECASE)
+    if not m:
+        return svg_content
+
+    attrs_text = m.group(1)
+
+    def _set_attr(text: str, name: str, value: str) -> str:
+        if re.search(rf'\b{name}\s*=\s*"[^"]*"', text):
+            return re.sub(
+                rf'\b{name}\s*=\s*"[^"]*"',
+                f'{name}="{value}"',
+                text,
+                count=1,
+            )
+        sep = "" if text.endswith(" ") or not text else " "
+        return text + sep + f'{name}="{value}"'
+
+    new_attrs = attrs_text
+    new_attrs = _set_attr(new_attrs, "width", "100%")
+    new_attrs = _set_attr(new_attrs, "height", "100%")
+    new_attrs = _set_attr(new_attrs, "preserveAspectRatio", "xMinYMin meet")
+
+    return svg_content.replace(m.group(0), f"<svg{new_attrs}>", 1)
+
+
 def annotate_marker_svg(
     svg_content: str,
     placements: list[dict] | None = None,
@@ -1146,8 +1187,8 @@ def annotate_marker_svg(
         )
         # piece 라벨 축소 (마카 길이 기반)
         svg_content = shrink_piece_labels(svg_content, marker_length_cm)
-    # aspect ratio 보존
-    svg_content = ensure_aspect_preservation(svg_content)
+    # 컨테이너 fit + aspect ratio 보존 (가로 스크롤 X — 사장님 본질 2026-05-06)
+    svg_content = fit_svg_to_container(svg_content)
     return svg_content
 
 
