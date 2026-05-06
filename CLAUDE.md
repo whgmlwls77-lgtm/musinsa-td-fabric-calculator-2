@@ -1,194 +1,144 @@
-# 원단 요척 산출 시스템 — 프로젝트 컨텍스트
+# 원단 요척 산출 시스템 — Claude 컨텍스트
 
-> 이 파일은 Claude Code가 매 세션 읽는 프로젝트 컨텍스트입니다.
-> 변경 시 간결하게 유지하세요. 세부 가이드는 별도 문서에 두고 여기서는 위치만 참조.
->
-> **🔥 최신 진행 상황은 `PROJECT_STATUS.md`를 먼저 읽으세요** (단일 진실 공급원).
-> 이 CLAUDE.md는 안정적인 컨텍스트만 담고, 변동 사항은 PROJECT_STATUS.md에서 관리.
+> 매 세션 첫 읽기. 변동 사항은 `PROJECT_STATUS.md` 참조.
+> 상세 사양: `specs/PATTERN_PREP_GUIDE.md` (v2.0 정식).
 
-## 1. 한 줄 요약
+## 1. 본질 (5줄)
 
-의류 패턴 **DXF 파일에서 자동 마카 배치 + 원단 요척**을 산출하는 Streamlit 웹앱.
-무신사 TD팀 사내 도구. 사용자: **소싱팀**(패턴사 X). 현재 **v3.3 베타** (jagua-rs sparrow 도입).
+의류 패턴 DXF → 자동 마카 + 원단 요척 산출.
+사용자: 무신사 TD팀 **소싱팀** (패턴 모름).
+협력사: 패턴사 (StyleCAD / Yuka 등 사용).
+시스템: **raw 데이터 처리** (추측 X).
+현재: v3.3 베타 (jagua-rs sparrow polygon NFP).
 
-## 1.5. 🚨 절대 원칙 — 매 세션 최우선 (2026-04-30 사장님 명시)
+## 2. 사장님 절대 원칙 (3개)
 
-> **"원리·개념·분석·근거로만 일해야 한다. 추측이나 임의 처리는 금지."**
+1. **raw 데이터 우선, 추측 금지** — DXF 명시된 정보만 사용. 누락 시 사용자에게 명시 입력 요구.
+2. **결정은 사장님, 클로드 = 제안 + 처리** — 추천 시 근거 라벨 (✅/❌) 의무. 정석 인정한 영역 추측으로 뒤집기 금지.
+3. **표준만 인식 (표준 외 = 위반 알림)** — 협력사 가이드 = 시스템 인식 어휘. 알파벳 하나 틀려도 위반 알림 (정상은 침묵).
 
-- **DXF raw 데이터 → 검토 → 명시된 대로 처리**. 누락 시 알고리즘 추정 X.
-- **금지**: bbox 비율로 결방향 추정 / 이름 substring으로 재질 추측 / 좌우 자동 미러
-- **의무**: 분류 결과 변경 시 raw 데이터(piece_name, material_raw, annotations, quantity) 출력으로 입증
-- **데이터 누락 시**: 사용자/패턴사에게 "패턴 파일에 X 누락 — 표기 필요" 명확히 안내. fallback 금지.
+## 3. 사장님 본질 6가지 (영구 박제 — 사용자 피드백 #34/#36)
 
-### 요척 산출 4대 핵심 요소 (하나라도 빠지면 결과 무의미)
-1. **재질별 분리 마카** — SELF/FUSE/LINING/CONTRAST/POCKET 각 별도 마카·요척
-2. **결방향 정확히** — 식서/푸서/바이어스, 회전 정렬 후 배치
-3. **벌수 + 1WAY/2WAY** — 마카 갯수 = `Σ(piece.quantity) × n_lay`. 1WAY=식서통일(0°), 2WAY=180°교차 허용
-4. **본사 검증 데이터 사용자 노출 X** — 결과·PDF·Excel 어디에도 본사 비교 표시 금지 (소싱팀은 본사 데이터 미보유)
+1. **식서 = 요척 핵심** — "식서 못 읽으면 요척 의미 없음"
+2. **원단 = 사용자 설정 그대로** — 패턴명과 별개 ("패턴명이 POCKETING 이라고 원단이 POCKETING 인 거 아님")
+3. **표준 정립 → 가이드 박제 → 시스템은 표준만 인식** — 표준 외 위반 알림
+4. **협력사 메시지 = 평이한 한국어** — "협력사는 프로그래머 아님"
+5. **마카 = 본사처럼 한눈에** — 가로 1줄, 스크롤 없이 (본사 요척서 컨벤션)
+6. **진단 = 위반만 알림** — 정상은 침묵
 
-상세 근거 / 검증 데이터 / 진행 상황 → **`PROJECT_STATUS.md`** (단일 진실 공급원)
+## 4. 표준 정의 (협력사 가이드 = 시스템 인식)
 
-### 1.5.1. 책임 분리 — 사장님 명시 (2026-05-04)
+| 항목 | 표준 |
+|------|------|
+| **원단 5종** | `SELF` / `LINING` / `POCKETING` / `CONTRAST` / `NON` |
+| 마카 제외 | `Material: NON` (StyleCAD 마커 제외 우회) |
+| 좌우 페어 | `PAIRED: DOUBLE` → mirror=True (q=1 + 페어) |
+| 단위 보정 | **50cm × 50cm 박스** (Material:NON, Piece Name:SCALE_BOX) |
+| 부위명 | `data/panel_mapping.json` 표준 어휘집 + 약자 (FB/BB/WBF 등) |
+| 식서 LAYER | `"7"` 또는 `"GRAIN"` (전용 LAYER, LINE 30mm 이상) |
 
-- **모든 결정은 사장님이 한다. 클로드는 결정 X.**
-- 클로드 역할: **제안 + 처리(수행)**.
-- 클로드는 옵션을 **정직하게 나열**하고 각각의 **근거·데이터를 보여줄 의무**가 있음.
-- "추천"을 할 때는 반드시 **근거 라벨 첨부** (✅ 데이터 기반 / ❌ 추측).
-  **추측 라벨이 붙은 추천은 결정 근거로 채택 불가.**
-- **정석/표준이 있는 영역에서 추측으로 정석을 뒤집는 추천 금지.**
+상세: `specs/PATTERN_PREP_GUIDE.md` v2.0 §1~§9.
 
-근거: 사용자 피드백 #30 (2026-05-04) — `PROJECT_STATUS.md` 상단 영구 박제. commit 850b864 분리 결정 시 정석(atomic commit) 인정 직후 추측 근거로 정석 뒤집은 사례.
+## 5. 시스템 흐름 (5단계)
 
-## 2. 핵심 파일 (꼭 알아야 할 것만)
+```
+DXF 업로드
+    ↓
+[1] parse_dxf_v3 (extract_pieces + 메타 파싱)
+    ↓
+[2] 자동 단위 보정 (50cm × 50cm 박스 → ×ratio)  ← 사용자 피드백 #36
+    ↓
+[3] 진단 리포트 (5 카테고리: 결방향/원단/패널/수량/스케일)
+    ↓
+[4] 재질별 sparrow nesting (auto_nesting_v2)
+    ↓
+[5] 결과 화면 (마카 SVG + 본사 비교 expander + PDF/Excel)
+```
 
-| 파일 | 역할 | 주의 |
-|------|------|------|
-| `app.py` | 메인 Streamlit 앱 (V3, ~3,300줄) | **이게 본체**. v1/v2 백업은 참고만 |
-| `extract_pieces.py` | DXF → 피스(블록) 추출 + Shapely 폴리곤화 | `find_outline()`, `parse_piece_metadata()` 재사용 |
-| `grain_extractor.py` | 식서/푸서/바이어스 LAYER 인식 | 점수제 — 28 DXF 모두 LAYER "7"/"5" 일관 |
-| `mirror_pieces.py` | 좌우 미러링 헬퍼 | ❌ 자동 미러 폐기 (절대 원칙). Quantity 메타 그대로 사용 |
-| `auto_nesting.py` | **Phase 1**: rectpack bbox nesting (5초, 빠름) | |
-| `auto_nesting_v2.py` | **Phase 2 ⭐**: jagua-rs sparrow polygon NFP (30초, 정확) | `bin/sparrow-darwin-arm64` 바이너리 호출 |
-| `dxf_diagnosis.py` | DXF 4대 카테고리 진단 (결방향/원단/패널/수량) | 알고리즘 실패 vs 협력사 누락 구분용 (2026-05-02) |
-| `fabric_calculator.py` | 요척 계산 엔진 (CLI 버전) | |
-| `visualize_pieces.py` | matplotlib 패턴 프리뷰 | |
-| `explore_dxf.py` | DXF 구조 탐색 헬퍼 (`open_dxf()` 재사용) | DXF 헤더 `$INSUNITS` **신뢰 금지** — 좌표값으로 단위 추정 |
-| `validate_against_reference.py` | 본사 검증 데이터 비교 (스켈레톤) | 채워야 함 |
-| `regression_test.py` | 회귀 테스트 | 변경 후 반드시 실행 |
-| `bin/sparrow-darwin-arm64` | jagua-rs sparrow 바이너리 (macOS arm64) | Linux 빌드 미생성 — Streamlit Cloud 배포 시 필요 |
-| `요척자료데이터/` | **본사 실제 요척 자료 (검증 데이터)** | 아래 §4 참조 |
-| `output/` | 생성된 리포트 (CSV/JSON/PNG/MD) | 커밋 안 함 |
-| `app_v1_backup.py`, `app_v2_backup.py` | 과거 버전 백업 | 손대지 말 것 |
+## 6. 프로젝트 구조 (카테고리 7개)
 
-## 3. 빠른 실행
+| 카테고리 | 위치 | 내용 |
+|---------|------|------|
+| **본질 (루트)** | `*.py` + `CLAUDE.md` + `AGENTS.md` + `PROJECT_STATUS.md` + `README.md` | 코드 + 컨텍스트 |
+| **사양 (specs/)** | `PATTERN_PREP_GUIDE.md` + `USER_GUIDE.md` + `DXF_조회_리스트.md` | 협력사/사용자 사양서 |
+| **데이터 (data/)** | `panel_mapping.json` + `material_mapping.json` | 표준 어휘집 |
+| **검증 (tests/)** | `test_*.py` (18 파일) | 단위 테스트 |
+| **히스토리 (docs/history/)** | `audits/` (보존 3개) + `feedback/` (#1~#36) | 결정 근거 박제 |
+| **임시 (workspace/)** | `logs/` + `scratch/` | gitignore — 커밋 X |
+| **사장님 영역** ⛔ | `요척 자료 데이터/` + `요척 패턴 데이터/` + `TEST 패턴 파일/` | **절대 X — gitignore** |
+
+## 7. 핵심 파일 (꼭 알아야 할 것만)
+
+| 파일 | 역할 |
+|------|------|
+| `app.py` | 메인 Streamlit 앱 (v3.3, ~3,300줄) |
+| `extract_pieces.py` | DXF → piece 추출 + 메타 파싱 |
+| `auto_nesting_v2.py` | jagua-rs sparrow polygon NFP nesting (Phase 2) |
+| `dxf_diagnosis.py` | 5 카테고리 진단 리포트 + 50cm 박스 자동 보정 |
+| `grain_extractor.py` | 식서 LAYER 인식 + 회전 정렬 |
+| `piece_name_normalize.py` | 부위명 표준 어휘집 정규화 (panel_mapping.json) |
+| `visualize_pieces.py` | 마카 SVG 시각화 (본사 컨벤션) |
+| `data/panel_mapping.json` | 부위명 표준 어휘집 + 약자 |
+| `bin/sparrow-darwin-arm64` | jagua-rs sparrow 바이너리 (macOS arm64) |
+| `specs/PATTERN_PREP_GUIDE.md` | 협력사 사양서 v2.0 정식 |
+| `tests/test_*.py` | 단위 테스트 (210/210 PASS) |
+
+## 8. 헛발질 방지 (자기 약속)
+
+1. **사장님 raw 메시지 우선** — PDF/캡쳐/audit md 직접 읽기. 추측 X.
+2. **추측 단어 금지** — "가능성 / 추정 / 옵션" 으로 결정 떠넘기기 X. 추천 시 ✅/❌ 라벨 의무.
+3. **사장님 결정 떠넘김 금지** — 클로드 처리 영역 (제안 + 코드/문서 작업) 명확히. 결정만 사장님.
+4. **정석 알면서 추측으로 뒤집기 금지** — 사용자 피드백 #30 (atomic commit / 책임 분리 영구 박제).
+5. **1차/2차 임의 분리 금지** — 사장님 본질대로 한 번에 처리.
+
+---
+
+## 9. 빠른 실행
 
 ```bash
-source venv/bin/activate            # 가상환경
-streamlit run app.py                # 앱 실행 → http://localhost:8501
-python regression_test.py           # 회귀 테스트
-python extract_pieces.py            # CLI로 피스 추출만
+source venv/bin/activate
+streamlit run app.py                              # 앱 실행 (http://localhost:8501)
+python -m unittest discover -s tests -p "test_*.py"  # 회귀 테스트 (210/210 PASS)
+python regression_test.py                         # 회귀 시나리오
 ```
 
-## 4. 검증 데이터 — 가장 중요 ⭐
+## 10. UI 라벨 규약 (혼동 주의)
 
-`요척자료데이터/` 폴더에 **본사 실제 요척서 48건**이 있음. 앱 계산값을 이 자료와 비교해 정확도 검증.
-
-### 4.1. 인덱스 파일
-
-| 파일 | 용도 |
+| 라벨 | 의미 |
 |------|------|
-| `요척자료데이터/요척_검증데이터.csv` | 모든 자료의 **품번/원단폭/요척/효율** 등을 표로 정리 (UTF-8 BOM, Excel 호환) |
-| `요척자료데이터/요척_검증데이터.json` | 동일 데이터의 JSON 버전 (프로그램에서 import용) |
+| 기준사이즈 | 마카의 base 사이즈 (예: L) |
+| 패턴 갯수 | 1벌당 unique 패턴 수 (예: 6) |
+| 마카 갯수 | 마카에 실제 깔린 총 piece 수 (예: 12) |
 
-### 4.2. 자료 종류 (3가지 포맷)
+- "조각 수" 사용 X (모호) → 위 3개 라벨로만 표기
+- "미러" 사용 X → "1WAY/2WAY" (의류업계 표준)
+- 본사 비교는 **1벌당 요척(yd)** 만 fair 메트릭 (효율 % 는 마카 구성 다르면 비교 무의미)
 
-1. **본사 요척서 (JPG, 37건)** — 한국 의류 CAD에서 출력한 표준 요척 보고서
-   - 좌측 상단에 `MWDPS-901 (SELF) (\SLACKS)` 같이 품번/재질/카테고리 명시
-   - 핵심 필드: `원단폭(in)`, `길이(yd+in)`, `조각수(N/N)`, `효율(%)`, `LOSS(%)`, **`요척(yd)`**, `사이즈/비율`
-   - 하단에 마카 도면 시각화
-
-2. **요척 PDF (6건)** — 더 간결한 표 + 마카 도면
-   - 헤더: `마카이름 / 날짜 / 패턴수`, `소재 / 원단폭 / 벌수`, `총장 / 요척 / 효율`
-
-3. **요척마카 PNG (1건)** — 유카(Yuka) 마카 프로그램 화면 캡처
-   - 중국어 UI, 효율 % 색상 게이지 표시
-
-4. **AP요척 (2건)**, **위클리플랜 XLSX (코스팅 시트)** — 형식 다름, 별도 처리
-
-### 4.3. 검증 시 주의사항
-
-- **단위는 야드(yd)**가 표준. 미터 변환: `1 yd = 0.9144 m`. 인치: `1 in = 2.54 cm`.
-- **LOSS 미포함 vs 포함** 구분 필수 (파일명에 `(LOSS미포함)` / `(NET)` 표기). 앱 계산값과 비교할 때 같은 기준이어야 함.
-- **사이즈/비율 표기**: `4:26-4` 같은 형식 — 사이즈 그룹 구성 의미. 실무자 확인 필요한 부분.
-- **재질 코드**: `SELF`(주원단), `FUSE`(심지), `LINING`(안감), `CONTRAST`(배색), `POCKET`(주머니감)
-- **OCR 자동 추출 9건은 수동 입력 필요** — `요척_검증데이터.csv`의 `비고` 컬럼에 표시됨
-
-## 5. 품번 명명 규칙 (관찰값)
-
-```
-M [성별] [시즌/연도] [카테고리] [순번]
-│   │      │        │           │
-│   │      │        │           └─ 3~5자리 숫자/문자
-│   │      │        └─ P=Pants, J=Jacket, S=Shirt/Skirt, K=Skirt, L=?, R=?, T=Tee
-│   │      └─ A,B,C,D,E,F,J,P,R,U (시즌 코드 추정)
-│   └─ M(남성) / W(여성) / K(키즈?) / F(?) / I(?)
-└─ 무신사 브랜드 prefix (추정)
-```
-
-예시:
-- `MWDPS901` → M-W(여성)-D-P(팬츠)-S-901 → 여성 팬츠/슬랙스
-- `MMAPS006` → M-M(남성)-A-P(팬츠)-S-006 → 남성 팬츠
-- `MMFLJ1A03` → M-M(남성)-F-L-J(자켓)-1A03
-
-> ⚠️ 위 규칙은 파일 관찰로 추정한 것. **실무자 확인 필요**. 정확한 코드북이 있으면 별도 추가.
-
-## 6. 도메인 용어
+## 11. 도메인 용어 (간략)
 
 | 한글 | 영문 | 설명 |
 |------|------|------|
-| 요척 | fabric consumption | 의류 1벌 만드는데 필요한 원단량 |
+| 요척 | fabric consumption | 의류 1벌당 원단량 |
 | 마카 | marker | 원단 위 패턴 배치도 |
-| 그레이딩 | grading | 사이즈별 패턴 확대/축소 |
+| 식서 | grain | 원단 직조 방향 |
 | 시접 | seam allowance | 봉제용 여유분 (1cm 표준) |
-| 결방향 | grain direction | 원단 직조 방향 |
-| 1WAY | one-way | 단방향 마카 (결방향 한쪽만) |
-| 2WAY | two-way | 양방향 마카 |
-| LOSS | loss | 끝단 손실분 + 결함 처리분 |
-| 본사 요척 | HQ fabric calc | 본사가 산출한 공식 요척 (vs 협력공장) |
+| LOSS | loss | 끝단 손실 + 결함 처리분 |
 | 사이바 | side body | 옆판 (한일혼용 방언) |
-| 플래킷 | placket | 셔츠 앞단 |
-| 넥밴드 | collar band | 칼라 밑단 |
-| 커프스 | cuff | 소매단 |
-| 요크 | yoke | 어깨 분할 패널 |
+| 마이다데 | fly underlay | FLY 안쪽 보강 |
+| 뎅고제감 | fly | FLY 본체 (지퍼 덮개) |
 
-## 6.5. UI 라벨 규약 (혼동 주의 — 사장님 명시)
+## 12. 주요 의사결정 (commit 박제)
 
-| 라벨 | 의미 | 예시 |
-|------|------|------|
-| **기준사이즈** | 마카의 base 사이즈 | L |
-| **패턴 갯수** | 1벌당 unique 패턴 수 | 6 |
-| **마카 갯수** | 마카에 실제 깔린 총 피스 수 | 12 |
-
-- "조각 수"는 **패턴 파일 조각 수** vs **마카 조각 수** 두 의미가 있어 모호 → 위 3개 라벨로만 표기.
-- "미러" 단어 사용 X → "1WAY/2WAY" (의류업계 표준).
-- 본사 비교는 **1벌당 요척(yd)**만 fair 메트릭. 효율 %는 마카 구성 다르면 비교 무의미.
-
-## 7. 디자인 토큰 (앱 UI)
-
-```
-배경      #ffffff
-서피스    #f8fafc
-텍스트    #0f172a
-서브텍스트 #64748b
-보더      #e2e8f0
-강조(빨강) #dc2626   ← Primary 버튼 + PDF 타이틀에만 사용
-```
-
-## 8. 개발 시 지켜야 할 것
-
-- **함수 단위 분리** + `if __name__ == "__main__":` 관용구 (모듈 import 시 main이 안 돌게)
-- **`pathlib.Path`** 사용 — 문자열 경로 X
-- **`Counter`, list comprehension** 등 파이썬 관용구 적극 활용
-- **타입 힌트** 권장 (`def f(x: Path) -> Counter:`)
-- **`partition(":")`** 사용 — `split(":")`은 `08:09` 같은 값에서 깨짐
-- **CP949 한글 디코딩** — Yuka(SuperALPHA_Plus) DXF는 한글이 깨져서 옴. `app.py`에 복원 로직 있음
-- **에러 처리**: `try/except`로 특정 예외만 잡기. `except Exception:` 남용 금지
-- **Shapely**: `Polygon(coords).buffer(0)` 트릭으로 자기교차 폴리곤 수리
-
-## 9. 앞으로 할 일 (LEARNING_NOTES 발췌)
-
-1. **재단 효율 분석** — 피스 합 ÷ bbox × 100 = 효율 %
-2. **그레이딩 시각화** — 사이즈별 외곽선 nested 표시
-3. **피스 자동 분류** — 외곽선 → KMeans → "FRONT/BACK/SLEEVE" 자동 라벨링
-4. **본사 검증 데이터 비교 자동화** — `validate_against_reference.py`(스켈레톤만 있음, 채워야 함)
-
-## 10. 관련 문서
-
-- `README.md` — 사용자용 개요
-- `USER_GUIDE.md` — 앱 사용법
-- `PATTERN_PREP_GUIDE.md` — 패턴사용 DXF 작성 규칙 (배포용)
-- `LEARNING_NOTES.md` — 코드 학습 노트 + 발전 아이디어
-- `패턴_준비_가이드.pptx` — 협력업체 배포용 PPT
+| 시점 | 결정 | commit |
+|------|------|--------|
+| 2026-04-28 | jagua-rs sparrow 채택 (Phase 2) | (Phase 2-A 본체) |
+| 2026-04-30 | 5가지 자동 추정 fallback 정정 (절대원칙) | (Phase 2-B-5) |
+| 2026-05-04 | 옵션 A 미러 처리 + §1.5.1 책임 분리 박제 | `850b864`, `870d241` |
+| 2026-05-05 | Material:NON 단일 표기 (StyleCAD 우회) | (피드백 #32) |
+| 2026-05-06 | 사장님 본질 6 + 표준 5종 (심지 폐기) | `42209a6`, `4f16b5d` |
+| 2026-05-07 | 50cm × 50cm 박스 자동 보정 (옵션 A) | `2bbefc3` |
+| 2026-05-07 | PATTERN_PREP_GUIDE v2.0 정식 승격 | `0e0b490` |
 
 ---
-*마지막 갱신: 2026-05-04 (절대 원칙 + 4대 핵심 요소 + Phase 2 모듈 반영)*
+
+*마지막 갱신: 2026-05-07 (정리 + 컨텍스트 재구축)*
