@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import ezdxf

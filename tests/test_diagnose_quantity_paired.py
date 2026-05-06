@@ -20,7 +20,7 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from dxf_diagnosis import per_garment_marker_pieces, diagnose_quantity, OK
