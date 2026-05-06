@@ -1128,9 +1128,11 @@ def diagnosis_section(parsed: dict) -> None:
 
     style = parsed.get("style") or "(미지정)"
 
-    n_fail = sum(1 for d in diag.values() if d["status"] == DIAG_FAIL)
-    n_warn = sum(1 for d in diag.values() if d["status"] == DIAG_WARN)
-    n_ok = sum(1 for d in diag.values() if d["status"] == DIAG_OK)
+    # 4대 카테고리만 status 카운트 (raw_table/violations 는 list 이므로 제외).
+    _status_keys = ("grain", "material", "panel", "quantity")
+    n_fail = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_FAIL)
+    n_warn = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_WARN)
+    n_ok = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_OK)
 
     # 헤더 — 한눈 요약.
     if n_fail == 0 and n_warn == 0:
@@ -1954,7 +1956,7 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
         )
 
     # ── 본사 매칭 비교 박스 (Phase 2-B-5 — expander 안에 숨김, 검증/테스트 용도) ──
-    if hq_match and any(safe_float(hq_match.get(k)) > 0 for k in ("효율_pct", "벌당_요척_yd")):
+    if hq_match and any(safe_float(hq_match.get(k)) > 0 for k in ("효율_pct", "벌당_요척_yd", "패턴수")):
       with st.expander(f"🔍 본사 검증 데이터 비교 ({hq_match.get('품번', '')})", expanded=False):
         main_row = next((r for r in summary_rows if r["material"] == "주원단"), None)
         if main_row is None and summary_rows:
@@ -1964,6 +1966,10 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             our_eff = main_row["efficiency_pct"]
             hq_yd = safe_float(hq_match.get("벌당_요척_yd"))
             our_yd = main_row.get("yards_per_garment") or main_row["marker_length_yd"]
+            # 1벌당 마카 piece 비교 — 사장님 본질 (2026-05-06):
+            #   PAIRED 처리 후 우리 시스템이 깐 piece 수 vs 본사 raw piece 수 (수동 입력).
+            hq_pieces = int(safe_float(hq_match.get("패턴수")))
+            our_pieces = main_row["pieces_count"] + main_row["mirror_count"]
             code = hq_match.get("품번", "")
 
             # 본사 마카 구성 추정 — 우선순위: 벌수 필드 > 사이즈비율 X
@@ -1996,11 +2002,33 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             # 두 줄 비교 (본사 / 우리)
             hq_eff_part = f"효율 **{hq_eff:.2f}%**" if hq_eff > 0 else "효율 데이터 없음"
             hq_yd_part = f"1벌당 **{hq_yd:.3f} yd**" if hq_yd > 0 else "1벌 요척 데이터 없음"
-            st.markdown(f"- **본사 마카**: {hq_config_str} · {hq_yd_part} · {hq_eff_part}")
+            hq_pcs_part = (
+                f"1벌당 **{hq_pieces} piece**" if hq_pieces > 0
+                else "1벌당 piece 수 미입력"
+            )
+            st.markdown(
+                f"- **본사 마카**: {hq_config_str} · {hq_pcs_part} · "
+                f"{hq_yd_part} · {hq_eff_part}"
+            )
             st.markdown(
                 f"- **우리 마카**: {our_config_str} · "
+                f"1벌당 **{our_pieces} piece** · "
                 f"1벌당 **{our_yd:.3f} yd** · 효율 **{our_eff:.2f}%**"
             )
+
+            # piece 수 갭 (본사 raw 보유 시) — PAIRED/Quantity 검증
+            if hq_pieces > 0:
+                pcs_gap = our_pieces - hq_pieces
+                if pcs_gap == 0:
+                    st.success(
+                        f"✅ 1벌당 piece 수 일치 ({our_pieces} = {hq_pieces}) — "
+                        f"PAIRED/Quantity 메타 정상"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ 1벌당 piece 수 갭: 우리 {our_pieces} vs 본사 {hq_pieces} "
+                        f"(갭 {pcs_gap:+d}) — PAIRED/Quantity 메타 검토 필요"
+                    )
 
             # 마카 구성 차이 안내 + 추천
             mismatch = False

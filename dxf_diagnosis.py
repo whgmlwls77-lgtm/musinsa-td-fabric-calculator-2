@@ -306,52 +306,120 @@ def diagnose_panel(parsed: dict) -> dict:
 
 # ──────────────────────────────────────────────
 # [4] 수량/대칭
+# 사장님 본질 (2026-05-06): PAIRED 처리 후 1벌당 마카 piece 명시.
+#   raw 14 unique → PAIRED 처리 후 17 (사장님 raw 정답) 같은 변환 표시.
 # ──────────────────────────────────────────────
+def per_garment_marker_pieces(p: dict) -> int:
+    """piece 1개의 1벌당 마카 piece 수 (옵션 A 정책 + 마카제외 반영).
+
+    옵션 A 정책 (auto_nesting_v2._split_mirrored_pieces 와 동치):
+      - mirror=True + q==1       → 2  (PAIRED:DOUBLE, orig+M split)
+      - mirror=True + q 짝수(≥2) → q  (q/2 + q/2 split, 합 보존)
+      - mirror=True + q 홀수(≥3) → q  (split skip, 원본만)
+      - mirror=False/None        → q
+      - Material:NON / 마카제외   → 0  (nesting skip)
+    """
+    if (p.get("material_inferred") or "").strip() == "마카제외":
+        return 0
+    raw_mat = (p.get("material_raw") or p.get("material") or "").strip().upper()
+    if raw_mat in {"NON", "NONE"}:
+        return 0
+    q = p.get("quantity") or 1
+    if p.get("mirror") is True and q == 1:
+        return 2
+    return q
+
+
 def diagnose_quantity(parsed: dict) -> dict:
     pieces = parsed["pieces"]
     n = len(pieces)
     if n == 0:
         return _empty("수량/대칭")
 
-    n_with_qty = sum(1 for p in pieces if p.get("quantity") is not None)
-    cov = n_with_qty / n
-    n_pair = sum(1 for p in pieces if p.get("quantity") == 2)
-
+    # unique piece 단위 집계 — diagnose_panel 과 일관.
+    seen_keys: set[str] = set()
+    n_unique = 0
+    n_excluded = 0
+    n_with_qty = 0
+    n_unique_pair = 0
+    n_unique_mirror = 0
     qty_dist: dict[str, int] = {}
+    per_garment_total = 0
+
     for p in pieces:
+        pk = p.get("piece_key") or p.get("piece_id") or ""
+        if pk in seen_keys:
+            continue
+        seen_keys.add(pk)
+        n_unique += 1
+
+        # 마카제외 카운트
+        raw_mat = (p.get("material_raw") or p.get("material") or "").strip().upper()
+        inferred_mat = (p.get("material_inferred") or "").strip()
+        if inferred_mat == "마카제외" or raw_mat in {"NON", "NONE"}:
+            n_excluded += 1
+
+        if p.get("quantity") is not None:
+            n_with_qty += 1
+        if p.get("quantity") == 2:
+            n_unique_pair += 1
+        if p.get("mirror") is True:
+            n_unique_mirror += 1
+
         q = p.get("quantity")
         key = str(q) if q is not None else "None"
         qty_dist[key] = qty_dist.get(key, 0) + 1
 
+        per_garment_total += per_garment_marker_pieces(p)
+
+    cov = n_with_qty / n_unique if n_unique > 0 else 0.0
+    n_classified = n_unique - n_excluded
+
     if cov >= 1.0:
         status = OK
-        summary = f"Quantity 메타 100% ({n}/{n}). 좌우 페어(2) {n_pair}개."
+        summary = (
+            f"Quantity 메타 100% ({n_unique}/{n_unique}). "
+            f"PAIRED 처리 후 1벌당 마카 piece: {per_garment_total}개"
+            + (f" (마카제외 {n_excluded}개 제외)" if n_excluded > 0 else "")
+            + "."
+        )
     elif cov >= 0.8:
         status = WARN
         summary = (
-            f"Quantity 메타 {n_with_qty}/{n} ({cov*100:.0f}%). "
-            f"누락 piece 는 1로 fallback (좌우 페어 누수 위험)."
+            f"Quantity 메타 {n_with_qty}/{n_unique} ({cov*100:.0f}%). "
+            f"누락 piece 는 1로 fallback (좌우 페어 누수 위험). "
+            f"1벌당 마카 piece (추정): {per_garment_total}개."
         )
     else:
         status = FAIL
         summary = (
-            f"Quantity 메타 {n_with_qty}/{n} ({cov*100:.0f}%) — 좌우 페어 처리 불가. "
+            f"Quantity 메타 {n_with_qty}/{n_unique} ({cov*100:.0f}%) — 좌우 페어 처리 불가. "
             f"사용자 입력 또는 협력사 표기 요청 필수."
         )
 
     qty_disp = ", ".join(f"{k}:{v}" for k, v in sorted(qty_dist.items()))
+    excluded_disp = f" · 마카제외 {n_excluded}개" if n_excluded > 0 else ""
     return {
         "status": status,
         "summary": summary,
-        "dxf_state": f"Quantity 보유 {n_with_qty}/{n} · 분포: {qty_disp}",
+        "dxf_state": (
+            f"DXF unique piece {n_unique}개 (마카 분류 {n_classified}{excluded_disp}) · "
+            f"Quantity 보유 {n_with_qty}/{n_unique} · 분포: {qty_disp}"
+        ),
         "algo_state": (
-            f"None → 1 fallback {n - n_with_qty}개 / 좌우 페어(2) {n_pair}개 그대로 적용"
+            f"PAIRED 처리 후 1벌당 마카 piece: {per_garment_total}개  "
+            f"(mirror=True {n_unique_mirror}개 / Q=2 페어 {n_unique_pair}개 / "
+            f"None→1 fallback {n_unique - n_with_qty}개)"
         ),
         "raw": {
             "qty_coverage": cov,
             "qty_distribution": qty_dist,
-            "pair_pieces": n_pair,
-            "fallback_to_1": n - n_with_qty,
+            "pair_pieces": n_unique_pair,
+            "fallback_to_1": n_unique - n_with_qty,
+            "n_unique_pieces": n_unique,
+            "n_excluded": n_excluded,
+            "n_mirror_true": n_unique_mirror,
+            "per_garment_marker_pieces": per_garment_total,
         },
     }
 
