@@ -81,7 +81,7 @@ class TestAspectPreservation(unittest.TestCase):
 class TestGrainArrows(unittest.TestCase):
 
     def test_arrow_length_40_percent_of_short_bbox(self):
-        """식서 화살표 길이 = bbox 짧은 변 × 40% (사장님 컨벤션)"""
+        """식서 화살표 길이 = bbox 짧은 변 × 40% (사장님 컨벤션 30~40%)"""
         placements = [{
             "piece_id": "P1", "x_cm": 0, "y_cm": 0,
             "bbox_w_cm": 10, "bbox_h_cm": 20,  # 짧은 변 = 10
@@ -89,10 +89,50 @@ class TestGrainArrows(unittest.TestCase):
         }]
         out = add_grain_arrows_to_svg(SAMPLE_SVG, placements)
         self.assertIn('id="grain_arrows"', out)
-        # 화살표 line 길이 검증 — bbox 짧은변(10) × 40% = 4
-        # piece 중심 (5, 10), 식서 Y → (5, 8) → (5, 12), 길이 4 ✓
+        # 화살표 길이 = 짧은변 10 × 40% = 4
+        # 중심 (5, 10), Y 방향 → start=(5, 8), end=(5, 12)
+        # head_len = 4 × 18% = 0.72 → line 본체 (8 → 12-0.72=11.28)
         self.assertIn('y1="8.000"', out)
-        self.assertIn('y2="12.000"', out)
+        self.assertIn('y2="11.280"', out)  # line tail (head 영역 빼고)
+        # 화살촉 polygon: 첫 vertex = 화살표 끝점 (5, 12)
+        self.assertIn('<polygon points="5.000,12.000', out)
+
+    def test_arrow_color_black_konvention(self):
+        """본사 컨벤션 (사장님 캡쳐 raw 2026-05-06): 식서 화살표 검정 — 빨강 폐기."""
+        placements = [{
+            "piece_id": "P1", "x_cm": 0, "y_cm": 0,
+            "bbox_w_cm": 10, "bbox_h_cm": 20,
+            "kind": "STRAIGHT_GRAIN_Y", "rotation_applied_deg": 0,
+        }]
+        out = add_grain_arrows_to_svg(SAMPLE_SVG, placements)
+        self.assertIn('stroke="#000000"', out)
+        self.assertIn('fill="#000000"', out)
+        self.assertNotIn('#cc0000', out)  # 구 빨강 폐기
+
+    def test_marker_defs_polygon_dynamic(self):
+        """markerUnits userSpaceOnUse 거대 화살촉 폐기 — polygon 동적 그리기."""
+        placements = [{
+            "piece_id": "P1", "x_cm": 0, "y_cm": 0,
+            "bbox_w_cm": 10, "bbox_h_cm": 20,
+            "kind": "STRAIGHT_GRAIN_Y", "rotation_applied_deg": 0,
+        }]
+        out = add_grain_arrows_to_svg(SAMPLE_SVG, placements)
+        # 구 marker 정의 (id="grain_arrow", 단수) 박혀있으면 안됨
+        self.assertNotIn('<marker id="grain_arrow"', out)
+        self.assertNotIn('marker-end="url(#grain_arrow)"', out)
+        # polygon 화살촉 동적 생성
+        self.assertIn('<polygon points=', out)
+
+    def test_stroke_width_dynamic_to_arrow_length(self):
+        """stroke-width 가 화살표 길이의 4% 비례 — piece 크기 무관 가림 X."""
+        # 큰 piece (bbox 100cm) → arrow_len 40 → stroke 1.6
+        placements = [{
+            "piece_id": "P1", "x_cm": 0, "y_cm": 0,
+            "bbox_w_cm": 100, "bbox_h_cm": 200,
+            "kind": "STRAIGHT_GRAIN_Y", "rotation_applied_deg": 0,
+        }]
+        out = add_grain_arrows_to_svg(SAMPLE_SVG, placements)
+        self.assertIn('stroke-width="1.600"', out)
 
 
 class TestAnnotateMarkerIntegration(unittest.TestCase):

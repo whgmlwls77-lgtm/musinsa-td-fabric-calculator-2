@@ -876,26 +876,15 @@ def _piece_grain_arrow_direction(grain_kind: str, rotation_deg: float) -> tuple[
     return (bx * cos_r - by * sin_r, bx * sin_r + by * cos_r)
 
 
-def _svg_arrow_marker_def() -> str:
-    """SVG defs 에 들어갈 화살촉 marker 정의."""
-    return (
-        '<defs>'
-        '<marker id="grain_arrow" viewBox="0 0 10 10" refX="9" refY="5" '
-        'markerUnits="userSpaceOnUse" markerWidth="3" markerHeight="3" orient="auto">'
-        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#cc0000"/>'
-        '</marker>'
-        '</defs>'
-    )
-
-
 def add_grain_arrows_to_svg(
     svg_content: str,
     placements: list[dict],
-    arrow_color: str = "#cc0000",
-    arrow_width: float = 0.4,
+    arrow_color: str = "#000000",
+    length_ratio: float = 0.4,
+    head_ratio: float = 0.18,
 ) -> str:
     """
-    sparrow SVG 에 piece 별 식서 화살표 추가.
+    sparrow SVG 에 piece 별 식서 화살표 추가 (사장님 본사 컨벤션 2026-05-06).
 
     placements 의 각 항목에서:
       - x_cm, y_cm           : piece 좌하단 (sparrow translation)
@@ -903,10 +892,17 @@ def add_grain_arrows_to_svg(
       - kind                 : grain.kind (STRAIGHT_GRAIN_X/Y, BIAS, ...)
       - rotation_applied_deg : sparrow 가 적용한 회전 (0/180)
 
-    각 piece 중심(cx, cy)에 식서 방향 단위벡터로 길이 = bbox 짧은변의 40% 짜리
-    화살표를 그림. SVG </svg> 직전에 <g id="grain_arrows"> 삽입.
+    각 piece 중심(cx, cy)에 식서 방향 단위벡터로 길이 = bbox 짧은변의 40%
+    짜리 화살표를 그림. SVG </svg> 직전에 <g id="grain_arrows"> 삽입.
 
-    절대 원칙: piece grain 정보가 없으면 화살표 X (추측 X). UNKNOWN/None 은 skip.
+    본사 컨벤션 (사장님 캡쳐 raw 적발):
+      - 색: 검정 (#000000) — 빨강 (#cc0000) 폐기, piece 라벨과 톤 통일
+      - 본체: <line> stroke-width = arrow_len × 4% (동적, piece 크기 비례)
+      - 화살촉: <polygon> 동적 — head_len = arrow_len × 18%
+        (구 markerUnits="userSpaceOnUse" markerWidth=3 폐기 — cm 좌표계에서
+         3cm 짜리 거대 화살촉이 piece 가리던 문제 해결)
+
+    절대 원칙: piece grain 정보가 없으면 화살표 X (추측 X). UNKNOWN/None skip.
     """
     if not svg_content or not placements:
         return svg_content
@@ -935,38 +931,51 @@ def add_grain_arrows_to_svg(
             continue
         dx, dy = direction
 
-        # 화살표 길이 = bbox 짧은변의 40% (피스 안에 들어가도록)
-        arrow_len = min(bw, bh) * 0.4
+        # 화살표 길이 = bbox 짧은변의 length_ratio (default 40%, 사양 30~40%).
+        arrow_len = min(bw, bh) * length_ratio
         if arrow_len < 0.5:  # 너무 짧으면 스킵 (가독성)
             continue
 
-        # 화살표 양 끝
+        # 화살촉 길이 = 화살표 길이의 head_ratio (default 18%, 사양 10~15% 살짝 위).
+        head_len = arrow_len * head_ratio
+        # 본체 stroke 두께 = 화살표 길이의 4% (piece 비례, 가림 X 가독성 ✓).
+        stroke_w = max(0.05, arrow_len * 0.04)
+
+        # 화살표 양 끝 좌표 (중심 기준 ±arrow_len/2)
         x1 = cx - dx * arrow_len / 2.0
         y1 = cy - dy * arrow_len / 2.0
         x2 = cx + dx * arrow_len / 2.0
         y2 = cy + dy * arrow_len / 2.0
 
+        # 본체 line 끝점 (head 영역 빼고)
+        x_tail = x2 - dx * head_len
+        y_tail = y2 - dy * head_len
+
+        # head triangle vertices — 본체 끝점 양 옆으로 head_len × 0.5 폭
+        perp_x = -dy * head_len * 0.5
+        perp_y = dx * head_len * 0.5
+        head_left_x = x_tail + perp_x
+        head_left_y = y_tail + perp_y
+        head_right_x = x_tail - perp_x
+        head_right_y = y_tail - perp_y
+
         arrow_lines.append(
-            f'<line x1="{x1:.3f}" y1="{y1:.3f}" x2="{x2:.3f}" y2="{y2:.3f}" '
-            f'stroke="{arrow_color}" stroke-width="{arrow_width}" '
-            f'marker-end="url(#grain_arrow)" stroke-linecap="round"/>'
+            f'<line x1="{x1:.3f}" y1="{y1:.3f}" '
+            f'x2="{x_tail:.3f}" y2="{y_tail:.3f}" '
+            f'stroke="{arrow_color}" stroke-width="{stroke_w:.3f}" '
+            f'stroke-linecap="round"/>'
+        )
+        arrow_lines.append(
+            f'<polygon points="{x2:.3f},{y2:.3f} '
+            f'{head_left_x:.3f},{head_left_y:.3f} '
+            f'{head_right_x:.3f},{head_right_y:.3f}" '
+            f'fill="{arrow_color}"/>'
         )
 
     arrow_lines.append('</g>')
     arrows_block = "\n".join(arrow_lines)
 
-    # 화살촉 marker 정의를 svg 시작 직후에 한 번만 삽입.
-    if "id=\"grain_arrow\"" not in svg_content:
-        marker_def = _svg_arrow_marker_def()
-        # 첫 <svg ...> 태그 닫힘 직후 삽입.
-        svg_content = re.sub(
-            r"(<svg[^>]*>)",
-            r"\1\n" + marker_def,
-            svg_content,
-            count=1,
-        )
-
-    # </svg> 직전 화살표 그룹 삽입.
+    # </svg> 직전 화살표 그룹 삽입 — marker defs 불필요 (polygon 동적 head).
     return svg_content.replace("</svg>", arrows_block + "\n</svg>")
 
 
