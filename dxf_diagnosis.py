@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from piece_name_normalize import normalize_piece_name
+
 # 진단 결과 상태값.
 OK = "OK"
 WARN = "WARN"
@@ -186,26 +188,11 @@ def diagnose_material(parsed: dict) -> dict:
 
 # ──────────────────────────────────────────────
 # [3] 패널 정보 (piece_name)
+# 사장님 본질 (2026-05-06): "표준만 인식 → 표준 외 위반 알림"
+#   panel_mapping.json 의 standard_names + 약자 매칭 = 표준
+#   미매칭 = 표준 외 (위반)
+#   Material:NON 마카제외 piece 는 패널 분류 대상에서 제외.
 # ──────────────────────────────────────────────
-_ALPHA_BODY_PARTS_RE = re.compile(
-    r"\b(FRONT|BACK|SLEEVE|COLLAR|CUFF|POCKET|YOKE|SIDE|FACING|BAND|PLACKET|LINING|"
-    r"SKIRT|WAIST|BELT|GUSSET|BODY|UNDERARM|HEM)\b",
-    re.IGNORECASE,
-)
-_DIGITS_ONLY_RE = re.compile(r"^\d+$")
-
-
-def _classify_piece_name(token: str) -> str:
-    if not token or not token.strip():
-        return "empty"
-    nm = token.strip()
-    if _DIGITS_ONLY_RE.match(nm):
-        return "digit_only"
-    if _ALPHA_BODY_PARTS_RE.search(nm):
-        return "english_word"
-    return "company_abbr"
-
-
 def diagnose_panel(parsed: dict) -> dict:
     pieces = parsed["pieces"]
     if not pieces:
@@ -213,63 +200,88 @@ def diagnose_panel(parsed: dict) -> dict:
 
     style = (parsed.get("style") or "").upper()
     seen_keys: set[str] = set()
-    by_class: dict[str, int] = {"english_word": 0, "company_abbr": 0, "digit_only": 0, "empty": 0}
+    by_class: dict[str, int] = {"standard": 0, "non_standard": 0, "empty": 0}
     samples: dict[str, list[str]] = {k: [] for k in by_class}
+    n_excluded = 0
 
     for p in pieces:
         pk = p.get("piece_key") or p.get("piece_id") or ""
         if pk in seen_keys:
             continue
         seen_keys.add(pk)
+
+        # 마카제외 (Material=NON) → 패널 표준 분류 대상 외.
+        raw_mat = (p.get("material_raw") or p.get("material") or "").strip().upper()
+        inferred_mat = (p.get("material_inferred") or "").strip()
+        if inferred_mat == "마카제외" or raw_mat in {"NON", "NONE"}:
+            n_excluded += 1
+            continue
+
         nm = (p.get("piece_name") or "").strip()
-        # 스타일 prefix 제거.
+        # 스타일 prefix 제거 (예: 'MMAPS003 FRONT_BODY' → 'FRONT_BODY')
         if style and nm.upper().startswith(style):
             nm = nm[len(style):].lstrip(" -_")
-        cls = _classify_piece_name(nm)
+
+        if not nm:
+            cls = "empty"
+            disp = "(empty)"
+        else:
+            std_name, is_standard = normalize_piece_name(nm)
+            if is_standard:
+                cls = "standard"
+                disp = std_name if std_name == nm.upper() else f"{nm} → {std_name}"
+            else:
+                cls = "non_standard"
+                disp = nm
+
         by_class[cls] += 1
         if len(samples[cls]) < 5:
-            samples[cls].append(nm or "(empty)")
+            samples[cls].append(disp)
 
-    n_unique = len(seen_keys)
-    n_eng = by_class["english_word"]
-    n_abbr = by_class["company_abbr"]
-    n_digit = by_class["digit_only"]
+    n_total = len(seen_keys)
+    n_classified = sum(by_class.values())
+    n_std = by_class["standard"]
+    n_non = by_class["non_standard"]
     n_empty = by_class["empty"]
 
-    if n_unique == 0:
+    # 마카제외만 있고 분류 대상 0개 → 정상 (마카 nesting skip).
+    if n_classified == 0:
+        if n_excluded > 0:
+            return {
+                "status": OK,
+                "summary": f"마카제외 piece 만 {n_excluded}/{n_total} (전부 nesting skip).",
+                "dxf_state": f"unique 부위 {n_total}개 (전부 마카제외)",
+                "algo_state": "마카 nesting skip",
+                "raw": {
+                    "n_unique_pieces": n_total,
+                    "by_class": by_class,
+                    "samples": samples,
+                    "n_excluded": n_excluded,
+                },
+            }
         return _empty("패널 정보")
 
-    if n_eng == n_unique:
+    excluded_disp = f" + 마카제외 {n_excluded}개" if n_excluded > 0 else ""
+
+    if n_std == n_classified:
         status = OK
-        summary = f"모든 piece 영문 표준 부위명 ({n_unique}/{n_unique})."
-    elif n_eng >= n_unique * 0.7:
-        status = OK
-        summary = f"영문 부위명 우세 ({n_eng}/{n_unique}). 약자/숫자 {n_unique - n_eng}개."
-    elif n_abbr > 0 and n_eng < n_unique * 0.3:
-        status = WARN
-        summary = (
-            f"회사 약자 우세 ({n_abbr}/{n_unique}). "
-            f"알고리즘이 약자 의미 모름 → 매핑 사전 또는 협력사 영문 표기 요청 필요."
-        )
-    elif n_digit > 0:
-        status = WARN
-        summary = (
-            f"piece_name 이 숫자만 표기 ({n_digit}/{n_unique}) — 부위 식별 불가. "
-            f"알고리즘이 부위별 분류 못 함."
-        )
-    elif n_empty > 0:
+        summary = f"모든 piece 표준 부위명 ({n_std}/{n_classified}){excluded_disp}."
+    elif n_empty > 0 and n_non == 0:
         status = FAIL
-        summary = f"이름 누락 piece {n_empty}/{n_unique}."
+        summary = f"이름 누락 piece {n_empty}/{n_classified}{excluded_disp}."
+    elif n_non > 0:
+        status = WARN
+        summary = (
+            f"표준 외 명칭 {n_non}/{n_classified}개{excluded_disp} — "
+            f"panel_mapping.json 표준 어휘집 등재 또는 영문 표준 부위명 사용 요청 필요."
+        )
     else:
         status = WARN
-        summary = (
-            f"혼재 패턴 — 영문:{n_eng} 약자:{n_abbr} 숫자:{n_digit} 누락:{n_empty}"
-        )
+        summary = f"혼재 — 표준:{n_std} 표준외:{n_non} 누락:{n_empty}{excluded_disp}"
 
-    # 샘플 표시 (각 카테고리 비어있지 않은 것만).
+    # 샘플 표시.
     sample_disp_parts = []
-    for cls, label in [("english_word", "영문"), ("company_abbr", "약자"),
-                       ("digit_only", "숫자"), ("empty", "누락")]:
+    for cls, label in [("standard", "표준"), ("non_standard", "표준외"), ("empty", "누락")]:
         if samples[cls]:
             sample_disp_parts.append(f"{label}: " + ", ".join(samples[cls]))
     sample_disp = " · ".join(sample_disp_parts)
@@ -277,16 +289,17 @@ def diagnose_panel(parsed: dict) -> dict:
     return {
         "status": status,
         "summary": summary,
-        "dxf_state": f"unique 부위 {n_unique}개 — {sample_disp}",
+        "dxf_state": f"unique 부위 {n_total}개 (마카 분류 {n_classified}, 마카제외 {n_excluded}) — {sample_disp}",
         "algo_state": (
-            "수동 매핑 UI 호출 필요"
-            if (n_abbr > 0 or n_digit > 0 or n_empty > 0)
-            else "영문 표기 그대로 사용"
+            "표준 외/누락 → 매핑 사전 또는 영문 표준 표기 요청"
+            if (n_non > 0 or n_empty > 0)
+            else "표준 표기 그대로 사용"
         ),
         "raw": {
-            "n_unique_pieces": n_unique,
+            "n_unique_pieces": n_total,
             "by_class": by_class,
             "samples": samples,
+            "n_excluded": n_excluded,
         },
     }
 
@@ -527,10 +540,10 @@ def build_coop_message(parsed: dict, diag: dict) -> str:
     if diag["panel"]["status"] in (WARN, FAIL):
         d = diag["panel"]["raw"]
         sub = []
-        if d.get("by_class", {}).get("company_abbr", 0) > 0:
-            sub.append("회사 약자 사용 시 약자→영문 부위명 매핑표 첨부 (또는 영문 부위명으로 직접 표기).")
-        if d.get("by_class", {}).get("digit_only", 0) > 0:
-            sub.append("piece_name 이 숫자만 표기된 piece → 부위명 추가 표기.")
+        if d.get("by_class", {}).get("non_standard", 0) > 0:
+            sub.append(
+                "표준 외 부위명 발견 → 표준 영문 부위명 (panel_mapping.json) 사용 또는 약자 매핑 추가 필요."
+            )
         if d.get("by_class", {}).get("empty", 0) > 0:
             sub.append("이름 누락 piece 발견 → 전 piece 에 Piece Name 부여.")
         if sub:
