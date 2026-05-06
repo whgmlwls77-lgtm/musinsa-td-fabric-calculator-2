@@ -1,6 +1,8 @@
-# 원단 요척 산출 시스템 — Claude 컨텍스트
+# 원단 요척 산출 시스템 — Codex / AI Agent 컨텍스트
 
-> 매 세션 첫 읽기. 변동 사항은 `PROJECT_STATUS.md` 참조.
+> 매 세션 첫 읽기 (Codex / Cursor / 기타 AI 에이전트).
+> Claude Code 는 `CLAUDE.md` 동일 내용 — 둘 모두 동기화 유지.
+> 변동 사항: `PROJECT_STATUS.md` 참조.
 > 상세 사양: `specs/PATTERN_PREP_GUIDE.md` (v2.0 정식).
 
 ## 1. 본질 (5줄)
