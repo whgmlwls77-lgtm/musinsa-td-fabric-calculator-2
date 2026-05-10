@@ -93,20 +93,21 @@ def _align_pieces_to_grain(
     pieces: list[dict],
     polygons: dict | None = None,
 ) -> tuple[list[dict], dict]:
-    """Phase 2 식서 사전 회전 (사장님 결정 2026-05-05).
+    """Phase 2 식서 사전 회전 (사장님 결정 2026-05-05, 본질 정정 2026-05-08).
 
-    각 piece 의 grain.kind 에 따라 polygon 을 회전해 식서를 Y축으로 통일.
-    sparrow 는 reflection / 임의 회전 처리하므로, 입력 단계에서 식서 정렬해두면
-    grain_mode (1WAY/2WAY) 가 일관되게 적용된다.
+    각 piece 의 grain.kind 에 따라 polygon 을 회전해 식서를 X축(마카 가로)으로 통일.
+    sparrow strip 좌표계: X축 = 마카 길이 (무한 성장), Y축 = 원단 폭.
+    → 식서 = 원단 길이방향 = 마카 가로 = sparrow X축 (사장님 본질).
 
     회전:
-      STRAIGHT_GRAIN_X → 90°  (식서 X → Y)
-      STRAIGHT_GRAIN_Y → 0°   (이미 Y, 회전 없음)
+      STRAIGHT_GRAIN_X → 0°   (이미 식서 가로 = 정상)
+      STRAIGHT_GRAIN_Y → 90°  (식서 Y → X 통일)
       BIAS / UNKNOWN / NONSTANDARD → 0°  (caller 가 추가 처리)
 
     Returns: (회전된 pieces, 회전된 polygons)
 
-    근거: "식서 못 읽으면 요척 의미 없음" — 사장님 본질.
+    근거: "식서 = 원단 길이방향 = 마카 가로" — 사장님 본질 (2026-05-08).
+    이전 (X→Y 회전) 은 sparrow strip 좌표계와 정반대. 본사 컨벤션 정정.
     """
     out_pieces: list[dict] = []
     out_polygons: dict = dict(polygons) if polygons else {}
@@ -121,9 +122,9 @@ def _align_pieces_to_grain(
         coords = p.get("coords_cm") or []
         if coords:
             new_p["coords_cm"] = rotate_polygon(coords, rot)
-        # grain 메타 갱신 — 회전 후엔 모두 STRAIGHT_GRAIN_Y, 90°
+        # grain 메타 갱신 — 회전 후엔 모두 STRAIGHT_GRAIN_X (마카 가로 통일).
         old_grain = p.get("grain") or {}
-        new_p["grain"] = {**old_grain, "kind": "STRAIGHT_GRAIN_Y", "angle_deg": 90.0,
+        new_p["grain"] = {**old_grain, "kind": "STRAIGHT_GRAIN_X", "angle_deg": 0.0,
                           "_rotated_by": rot}
 
         # polygon (mm shapely) 도 동일 회전 적용
@@ -873,7 +874,16 @@ def _piece_grain_arrow_direction(grain_kind: str, rotation_deg: float) -> tuple[
     bx, by = base
     rad = math.radians(rotation_deg)
     cos_r, sin_r = math.cos(rad), math.sin(rad)
-    return (bx * cos_r - by * sin_r, bx * sin_r + by * cos_r)
+    dx = bx * cos_r - by * sin_r
+    dy = bx * sin_r + by * cos_r
+    # 식서 양방향 본질 — 사장님 본질 정정 (2026-05-08).
+    # 본사 컨벤션: 식서 = 원단 길이방향 = 마카 가로 (→). sparrow strip X축 통일.
+    # sparrow 2WAY 가 0°/180° 혼합 배치해도 식서는 직조 방향이라 부호 반전 동일 식서
+    # → 화살표 마카 좌표계 +X (→) 통일.
+    eps = 1e-9
+    if dx < -eps or (abs(dx) < eps and dy < -eps):
+        dx, dy = -dx, -dy
+    return (dx, dy)
 
 
 def add_grain_arrows_to_svg(
@@ -1624,6 +1634,15 @@ def nest_by_material_multisize(
 
         marker_cm = res.get("marker_length_cm", 0.0)
         n_mirror = sum(1 for v in res.get("mirror_count_per_piece", {}).values() if v == 1)
+        # 마카 갯수 본질 — placements 기반 정확화 (사장님 본질 2026-05-10).
+        # pieces_count(=unique 패턴) × tg ≠ 본사 비교 단위.
+        # 본사 "패턴수" = 1벌당 마카에 실제 깔린 piece 수 (mirror split + PAIRED 펼친 후).
+        # → placements 길이가 진짜 마카 갯수.
+        placements_total = len(res.get("placements", []))
+        tg_calc = res.get("total_garments", 1) or 1
+        placements_per_garment = (
+            placements_total // tg_calc if tg_calc > 0 else placements_total
+        )
         summary_rows.append({
             "material": mat,
             "fabric_width_cm": width,
@@ -1631,6 +1650,9 @@ def nest_by_material_multisize(
             "marker_length_yd": marker_cm * CM_TO_YD,
             "pieces_count": len(mat_pieces),  # 1벌당 unique 패턴
             "mirror_count": n_mirror,
+            # 마카 실제 깔린 piece 수 (본사 "패턴수" 와 fair 비교 단위).
+            "placements_total": placements_total,
+            "placements_per_garment": placements_per_garment,
             "efficiency_pct": res.get("efficiency", 0.0) * 100,
             "runtime_actual_sec": res.get("runtime_actual_sec", 0.0),
             "has_error": bool(res.get("error")),

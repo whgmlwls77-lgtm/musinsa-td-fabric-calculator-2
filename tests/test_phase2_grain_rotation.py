@@ -2,15 +2,15 @@
 """
 test_phase2_grain_rotation.py
 -----------------------------
-Phase 2 sparrow 식서 사전 회전 단위 테스트 (사장님 결정 2026-05-05).
+Phase 2 sparrow 식서 사전 회전 단위 테스트 (사장님 본질 정정 2026-05-08).
 
 배경:
-  "식서 못 읽으면 요척 의미 없음" — 사장님 본질.
-  sparrow 호출 전 grain.kind 에 따라 polygon 을 회전해 식서를 Y축으로 통일.
+  "식서 = 원단 길이방향 = 마카 가로" — 사장님 본질.
+  sparrow strip X축 = 마카 길이 → 식서 X축 통일이 본사 컨벤션.
 
 검증:
-  1. STRAIGHT_GRAIN_X piece → 90° 회전 적용 (식서 X → Y)
-  2. STRAIGHT_GRAIN_Y piece → 회전 없음 (이미 Y)
+  1. STRAIGHT_GRAIN_Y piece → 90° 회전 적용 (식서 Y → X 통일)
+  2. STRAIGHT_GRAIN_X piece → 회전 없음 (이미 가로 = 정상)
   3. BIAS piece → 회전 없음 (사선 유지)
   4. UNKNOWN/NONSTANDARD → 회전 없음 (caller 처리)
   5. polygons (mm shapely) 도 동일 회전 적용
@@ -51,9 +51,10 @@ def _piece(pid: str, kind: str, w: float = 10.0, h: float = 20.0) -> dict:
 
 class TestGrainRotation(unittest.TestCase):
 
-    def test_grain_x_rotates_90(self):
-        """STRAIGHT_GRAIN_X piece → 90° 회전. 가로 10, 세로 20 → 가로 20, 세로 10."""
-        p = _piece("X1", kind="STRAIGHT_GRAIN_X", w=10, h=20)
+    def test_grain_y_rotates_90(self):
+        """STRAIGHT_GRAIN_Y piece → 90° 회전. 가로 10, 세로 20 → 가로 20, 세로 10
+        (사장님 본질 정정 2026-05-08: 식서 Y → X 통일, 마카 가로 일치)."""
+        p = _piece("Y1", kind="STRAIGHT_GRAIN_Y", w=10, h=20)
         out, _ = _align_pieces_to_grain([p], polygons=None)
         self.assertEqual(len(out), 1)
         new_coords = out[0]["coords_cm"]
@@ -64,17 +65,17 @@ class TestGrainRotation(unittest.TestCase):
         new_h = max(ys) - min(ys)
         self.assertAlmostEqual(new_w, 20.0, places=2, msg=f"회전 후 폭: {new_w}")
         self.assertAlmostEqual(new_h, 10.0, places=2, msg=f"회전 후 높이: {new_h}")
-        # grain.kind 갱신
-        self.assertEqual(out[0]["grain"]["kind"], "STRAIGHT_GRAIN_Y")
-        self.assertEqual(out[0]["grain"]["angle_deg"], 90.0)
+        # grain.kind 갱신 — 회전 후 X (마카 가로 통일)
+        self.assertEqual(out[0]["grain"]["kind"], "STRAIGHT_GRAIN_X")
+        self.assertEqual(out[0]["grain"]["angle_deg"], 0.0)
         self.assertEqual(out[0]["grain"]["_rotated_by"], 90.0)
 
-    def test_grain_y_unchanged(self):
-        """STRAIGHT_GRAIN_Y piece → 회전 없음."""
-        p = _piece("Y1", kind="STRAIGHT_GRAIN_Y", w=10, h=20)
+    def test_grain_x_unchanged(self):
+        """STRAIGHT_GRAIN_X piece → 회전 없음 (이미 식서 가로 = 정상)."""
+        p = _piece("X1", kind="STRAIGHT_GRAIN_X", w=10, h=20)
         out, _ = _align_pieces_to_grain([p], polygons=None)
         self.assertEqual(out[0]["coords_cm"], p["coords_cm"])
-        self.assertEqual(out[0]["grain"]["kind"], "STRAIGHT_GRAIN_Y")
+        self.assertEqual(out[0]["grain"]["kind"], "STRAIGHT_GRAIN_X")
         self.assertNotIn("_rotated_by", out[0]["grain"])
 
     def test_grain_bias_unchanged(self):
@@ -92,23 +93,23 @@ class TestGrainRotation(unittest.TestCase):
         self.assertEqual(out[0]["coords_cm"], p["coords_cm"])
 
     def test_polygons_rotate_with_pieces(self):
-        """polygons (mm shapely) 도 동일 회전."""
+        """polygons (mm shapely) 도 동일 회전 (Y → X 정정 후)."""
         coords_mm = [(0, 0), (100, 0), (100, 200), (0, 200)]  # 100 × 200 mm
         poly = ShapelyPolygon(coords_mm)
-        p = _piece("X2", kind="STRAIGHT_GRAIN_X", w=10, h=20)
-        out, out_polys = _align_pieces_to_grain([p], polygons={"X2": poly})
-        rotated_poly = out_polys["X2"]
-        # 회전 후 bbox 크기 swap
+        p = _piece("Y2", kind="STRAIGHT_GRAIN_Y", w=10, h=20)
+        out, out_polys = _align_pieces_to_grain([p], polygons={"Y2": poly})
+        rotated_poly = out_polys["Y2"]
+        # 회전 후 bbox 크기 swap (200×100)
         minx, miny, maxx, maxy = rotated_poly.bounds
         self.assertAlmostEqual(maxx - minx, 200.0, places=1)
         self.assertAlmostEqual(maxy - miny, 100.0, places=1)
 
 
 class TestRegression(unittest.TestCase):
-    """기존 STRAIGHT_GRAIN_Y 일관 piece 들에 영향 없음."""
+    """기존 STRAIGHT_GRAIN_X 일관 piece 들에 영향 없음 (정상 식서)."""
 
-    def test_all_y_pieces_unchanged(self):
-        pieces = [_piece(f"P{i}", "STRAIGHT_GRAIN_Y") for i in range(5)]
+    def test_all_x_pieces_unchanged(self):
+        pieces = [_piece(f"P{i}", "STRAIGHT_GRAIN_X") for i in range(5)]
         out, _ = _align_pieces_to_grain(pieces, polygons=None)
         for orig, new in zip(pieces, out):
             self.assertEqual(orig["coords_cm"], new["coords_cm"])

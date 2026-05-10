@@ -2182,6 +2182,29 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
 
     st.divider()
 
+    # ── 모든 마카 viewBox 사전 수집 (이슈 3 — 사장님 본질 2026-05-08) ──
+    # 마카별 px/cm 통일: 가장 큰 마카 폭 (max_vb_w_all) 을 컨테이너 100% 기준으로 잡고,
+    # 작은 마카는 (vb_w / max_vb_w_all) 비례 width 로 표시 → piece 시각 비율 정확.
+    # (모든 마카 컨테이너 100% width 시 안감 piece 가 주원단 piece 보다 커 보이는 왜곡 정정.)
+    _MARKER_VB_RE = re.compile(
+        r'viewBox\s*=\s*"\s*[\-0-9.]+\s+[\-0-9.]+\s+([\-0-9.]+)\s+([\-0-9.]+)"'
+    )
+    vb_dims_by_mat: dict[str, tuple[float, float]] = {}
+    for _mat in materials_ordered:
+        _res = by_material.get(_mat)
+        if not _res:
+            continue
+        _svg = _res.get("svg_content_humanized") or _res.get("svg_content", "")
+        if not _svg:
+            continue
+        _m = _MARKER_VB_RE.search(_svg)
+        if _m:
+            vb_dims_by_mat[_mat] = (float(_m.group(1)), float(_m.group(2)))
+    max_vb_w_all = max(
+        (vw for vw, _ in vb_dims_by_mat.values()),
+        default=1.0,
+    )
+
     # ── 재질별 상세 카드 ──
     for mat in materials_ordered:
         res = by_material.get(mat)
@@ -2229,14 +2252,32 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             else:
                 st.metric("효율", f"{eff_pct:.1f} %")
         with c4:
-            # 새 라벨 통일 (사장님 명시):
-            #   "마카 갯수" = 마카에 실제 깔린 모든 피스 수 (= n_total × tg)
+            # 마카 갯수 본질 — placements 기반 정확화 (사장님 본질 2026-05-10).
+            # 본사 "패턴수" 와 fair 비교 단위 = 1벌당 마카에 실제 깔린 piece 수.
+            # 기존 (n_pat + n_mir) × tg 로직은 mirror_count 누락 시 본사 갭 발생.
             n_pat = row["pieces_count"]
-            n_mir = row["mirror_count"]
-            tg = row.get("total_garments", 1)
-            per_garment_pieces = n_pat + n_mir  # 1벌당 마카에 깔리는 피스 수
-            n_total = per_garment_pieces * (tg if tg > 1 else 1)
-            sub = f"패턴 {n_pat} × {tg}벌" if tg > 1 else None
+            tg = row.get("total_garments", 1) or 1
+            n_total = row.get("placements_total", 0)
+            per_garment = row.get("placements_per_garment", 0)
+            # 본사 비교 — 주원단만 (소재별 본사 raw 보유 한정).
+            is_main_pat = (row["material"] == "주원단")
+            hq_pat_raw = hq_match.get("패턴수") if (is_main_pat and hq_match) else None
+            try:
+                hq_pat = int(str(hq_pat_raw).strip()) if hq_pat_raw not in (None, "") else None
+            except (ValueError, TypeError):
+                hq_pat = None
+            if tg > 1 and hq_pat is not None:
+                gap_pat = per_garment - hq_pat
+                verdict_pat = "✓ 일치" if gap_pat == 0 else (f"⚠ {gap_pat:+d}")
+                sub = f"1벌당 {per_garment} / 본사 {hq_pat} ({verdict_pat})"
+            elif tg > 1:
+                sub = f"1벌당 {per_garment}개 × {tg}벌"
+            elif hq_pat is not None:
+                gap_pat = n_total - hq_pat
+                verdict_pat = "✓ 일치" if gap_pat == 0 else (f"⚠ {gap_pat:+d}")
+                sub = f"본사 {hq_pat} ({verdict_pat})"
+            else:
+                sub = f"unique 패턴 {n_pat}"
             st.metric("마카 갯수", f"{n_total} 개", sub)
         # 통일된 caption — 기준사이즈 / 패턴 갯수 / 마카 갯수
         st.caption(
@@ -2245,25 +2286,31 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
         )
 
         # SVG 시각화 (한글 라벨) — 화면에만 표시. 다운로드는 PDF 한 가지로 통합 (작업 5).
-        # iframe 가로 스크롤 X + 잘림 X (사장님 본질 2026-05-06 + 2026-05-07).
+        # iframe 가로 스크롤 X + 잘림 X (사장님 본질 2026-05-06 + 2026-05-07 + 2026-05-08).
         svg = res.get("svg_content_humanized") or res.get("svg_content", "")
         if svg:
-            vb_match = re.search(
-                r'viewBox\s*=\s*"\s*[\-0-9.]+\s+[\-0-9.]+\s+([\-0-9.]+)\s+([\-0-9.]+)"',
-                svg,
-            )
-            if vb_match:
-                vb_w = float(vb_match.group(1))
-                vb_h = float(vb_match.group(2))
-                # 컨테이너 폭 ≈ 700px (Streamlit wide main column) 기준 높이 추정.
-                # 잘림 방지 마진 ×1.12 — 외부 화살표/라벨이 iframe 영역 밖으로 안 나가도록.
-                h_px = (
-                    max(200, min(960, int(700 * vb_h / vb_w * 1.12)))
-                    if vb_w > 0 else 460
+            dims = vb_dims_by_mat.get(mat)
+            if dims and max_vb_w_all > 0:
+                vb_w, vb_h = dims
+                # px/cm 통일 (이슈 3 본질 — 사장님 캡쳐 raw 정정 2026-05-08).
+                # 가장 큰 마카 폭이 컨테이너 100% 기준 → 작은 마카는 비례 width 로 표시.
+                ratio = vb_w / max_vb_w_all  # 0 < ratio ≤ 1
+                width_pct = ratio * 100.0
+                # iframe height = max_vb_w_all 기준 (모든 마카 동일 px/cm 보장).
+                # 잘림 방지 마진 ×1.25 (이슈 2 통일).
+                h_px = max(
+                    240,
+                    min(1200, int(700 * vb_h / max_vb_w_all * 1.25)),
                 )
+                # wrapper div 로 width 비례 — iframe 안에서 SVG 가 좌측 ratio% 만 차지.
+                # SVG 자체는 width="100%" + xMidYMid meet 이라 wrapper 비율 따라 그려짐.
+                wrapper_html = (
+                    f'<div style="width:{width_pct:.2f}%; '
+                    f'margin:0; padding:0;">{svg}</div>'
+                )
+                st.components.v1.html(wrapper_html, height=h_px, scrolling=False)
             else:
-                h_px = 460
-            st.components.v1.html(svg, height=h_px, scrolling=False)
+                st.components.v1.html(svg, height=480, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
 
