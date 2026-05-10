@@ -106,6 +106,21 @@ DXF 업로드
 
 **진짜 본질**: 사장님이 검증자 역할 X. 클로드가 자가 검증 후 답변.
 
+### 8.1.1. Streamlit module import cache 헛발질 방지 (사용자 피드백 — 2026-05-08)
+
+**박제**: 코드 변경 후 Streamlit 검증 시 → `pkill + 재실행` 필수.
+`runOnSave=true` 는 `app.py` 만 reload, import 된 외부 모듈은 `sys.modules` 캐시.
+
+```bash
+pkill -f "streamlit run app.py"
+sleep 2
+nohup streamlit run app.py --server.runOnSave true > /tmp/streamlit.log 2>&1 &
+```
+
+**적용 대상**: `auto_nesting_v2.py` / `grain_extractor.py` / `extract_pieces.py` 등 외부 모듈 변경 시 필수. `app.py` 내부만 변경 시 hot reload 가능.
+
+**진짜 본질 (사장님 적발)**: "▶️ 마카 + 요척 산출 버튼 다시 누르기" 만으로 미해결 → `sys.modules` 캐시 hit. 어제 코드 결과 그대로 표시. **재시작 외 우회 X**.
+
 ---
 
 ## 9. 빠른 실행
@@ -154,7 +169,8 @@ python regression_test.py                         # 회귀 시나리오
 | 2026-05-07 | 50cm × 50cm 박스 자동 보정 (옵션 A) | `2bbefc3` |
 | 2026-05-07 | PATTERN_PREP_GUIDE v2.0 정식 승격 | `0e0b490` |
 | 2026-05-07 | 답변 전 자가 검증 체크리스트 §8.1 박제 (피드백 #38) | (다음 commit) |
+| 2026-05-08 | §8.1.1 Streamlit module import cache 헛발질 방지 박제 | (다음 commit) |
 
 ---
 
-*마지막 갱신: 2026-05-07 (자가 검증 체크리스트 §8.1 추가 — 사용자 피드백 #38)*
+*마지막 갱신: 2026-05-08 (§8.1.1 Streamlit module import cache 박제 — 사용자 피드백)*
