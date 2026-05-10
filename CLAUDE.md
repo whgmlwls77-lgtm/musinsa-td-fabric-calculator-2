@@ -170,7 +170,8 @@ python regression_test.py                         # 회귀 시나리오
 | 2026-05-07 | PATTERN_PREP_GUIDE v2.0 정식 승격 | `0e0b490` |
 | 2026-05-07 | 답변 전 자가 검증 체크리스트 §8.1 박제 (피드백 #38) | (다음 commit) |
 | 2026-05-08 | §8.1.1 Streamlit module import cache 헛발질 방지 박제 | (다음 commit) |
+| 2026-05-10 | 식서 가로 통일 (X 그대로/Y 회전) + 마카 갯수 placements 라벨 정정 — 사장님 시각 검증 ✅ | (다음 commit) |
 
 ---
 
-*마지막 갱신: 2026-05-08 (§8.1.1 Streamlit module import cache 박제 — 사용자 피드백)*
+*마지막 갱신: 2026-05-10 (식서 가로 통일 + 마카 갯수 placements 라벨 정정 — 사장님 시각 검증 통과)*
