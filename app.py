@@ -2291,9 +2291,14 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
                 # 사장님 본질 정정 2026-05-11: 각 마카 컨테이너 100% width 박음.
                 # px/cm 통일 본문 폐기 → 안감 piece 가 주원단보다 작아 보이는 본질 해소.
                 # 사장님 본질 #5: "마카 = 본사처럼 한눈에" (가로 1줄 본사 컨벤션).
-                # h_px 은 각 마카 자체 vb_h/vb_w 비율 박음 (잘림 마진 ×1.25).
+                #
+                # h_px 본질 정정 2026-05-11 (포켓팅 적발):
+                # - 1.25 배 마진 제거: viewBox 정정 (add_axis_labels_to_svg) 본질
+                #   박힌 후 축 라벨 영역이 이미 viewBox 안. 추가 마진 박혀 화면 한눈에 X.
+                # - clamp 1200 → 800: 사장님 본질 #5 "한눈에" 우선. 포켓팅 h_px=1278
+                #   → 1200 clamp 박혀있던 본질이 너무 큼 → 800 clamp 박음.
                 if vb_w > 0:
-                    h_px = max(240, min(1200, int(700 * vb_h / vb_w * 1.25)))
+                    h_px = max(240, min(800, int(700 * vb_h / vb_w)))
                 else:
                     h_px = 480
                 st.components.v1.html(svg, height=h_px, scrolling=False)
