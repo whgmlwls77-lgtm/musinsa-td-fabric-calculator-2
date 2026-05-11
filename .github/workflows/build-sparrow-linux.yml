@@ -1,0 +1,68 @@
+name: Build sparrow Linux x86_64
+
+# 본질 (사장님 명령 2026-05-11):
+#   Streamlit Cloud 배포 본질 — Linux x86_64 sparrow 바이너리 박음.
+#   bin/README.md raw 본질: upstream = JeroenGar/sparrow (별도 repo, NOT jagua-rs).
+#   workflow_dispatch 박음 (수동 trigger). main 자동 push 박음.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-sparrow-linux.yml'
+
+permissions:
+  contents: write  # bin/sparrow-linux-x86_64 자동 commit 박음
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Clone JeroenGar/sparrow (raw 본질 — bin/README.md 박힌 upstream)
+        run: |
+          git clone --depth 1 https://github.com/JeroenGar/sparrow /tmp/sparrow_build
+          cd /tmp/sparrow_build
+          # 박힌 commit hash 본질 박음 (bin/README.md 업데이트 본질 박을 때 참고)
+          echo "SPARROW_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Build sparrow (cargo release)
+        working-directory: /tmp/sparrow_build
+        run: cargo build --release --bin sparrow
+
+      - name: Copy binary → bin/sparrow-linux-x86_64
+        run: |
+          mkdir -p bin
+          cp /tmp/sparrow_build/target/release/sparrow bin/sparrow-linux-x86_64
+          chmod +x bin/sparrow-linux-x86_64
+
+      - name: Verify binary
+        run: |
+          file bin/sparrow-linux-x86_64
+          ls -la bin/sparrow-linux-x86_64
+          ./bin/sparrow-linux-x86_64 --help || true
+
+      - name: Commit binary (자동 박음)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bin/sparrow-linux-x86_64
+          if git diff --cached --quiet; then
+            echo "변경 없음 — commit 박지 X"
+          else
+            git commit -m "build: sparrow-linux-x86_64 GitHub Actions native build (sparrow @ ${SPARROW_COMMIT:0:7})"
+            git push
+          fi
