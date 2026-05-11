@@ -94,6 +94,27 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ---
 
+## Streamlit Cloud 배포 본질
+
+### 회사 사용자 접근 URL
+- 공개 URL: `https://[app-name].streamlit.app` (Streamlit Cloud 박힌 본문)
+- 사용자: 무신사 TD팀 **소싱팀** (회사 발표 후 C 이전 본질 — AWS/Render/Railway)
+
+### 배포 본문
+1. GitHub Actions workflow `build-sparrow-linux.yml` 박은 본문 (수동 trigger)
+   - 위치: `.github/workflows/build-sparrow-linux.yml`
+   - upstream: `JeroenGar/sparrow` (raw 본질 — bin/README.md §17 박힌 본문)
+2. 결과: `bin/sparrow-linux-x86_64` 자동 commit 박힘 (GitHub Actions bot)
+3. Streamlit Cloud 박은 본문 → repo 연동 → `main` 브랜치 박음 → 자동 deploy
+4. secrets: Streamlit Cloud UI 박은 본문 (`.streamlit/secrets.toml` 본질, gitignore 박혀있음 → 미커밋)
+
+### 데이터 본질 (사장님 절대 원칙)
+- **사장님 영역** (`요척 자료 데이터/` + `요척 패턴 데이터/` + `TEST 패턴 파일/`) = gitignore 박혀있음 → repo 미포함 → Streamlit Cloud 미접근
+- **사용자 입력 DXF** = Streamlit `st.file_uploader` 박힌 본문 (메모리 박힘, 세션 종료 후 삭제)
+- **본사 검증 데이터** (사장님 영역) = 사용자 화면에 표시 X (UI 정책 박혀있음)
+
+---
+
 ## 라이선스
 
 내부 도구. 외부 배포 금지.

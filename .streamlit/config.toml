@@ -7,6 +7,9 @@ textColor = "#0f172a"
 font = "sans serif"
 
 [server]
+# Streamlit Cloud 배포 본질 (사장님 명령 2026-05-11)
+headless = true
+enableCORS = false
 maxUploadSize = 50
 enableXsrfProtection = true
 
