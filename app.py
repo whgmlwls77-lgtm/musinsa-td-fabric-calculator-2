@@ -2181,12 +2181,46 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
 
     st.divider()
 
-    # ── 마카 viewBox 추출 정규식 (각 마카 자체 비율 박음) ──
-    # 사장님 본질 정정 2026-05-11: px/cm 통일 본문 폐기. 안감/주원단 따로 보는 본질
-    # (사장님 본질 #5 "마카 = 본사처럼 한눈에") 우선 → 각 마카 컨테이너 100% width.
+    # ── 마카 viewBox 사전 수집 + 모든 마카 동일 h_px 박음 ──
+    # 사장님 본질 재정정 2026-05-11 (MWDKL806 시각 적발 14:16):
+    #   "제원단과 동일 비율" → 모든 마카 컨테이너 박스 시각 크기 동일.
+    #
+    # 어제 commit e106424 박은 본문 (각 마카 자체 vb_h/vb_w 비율) 헛발질:
+    #   - 포켓팅 vb 비율 1.654 (세로 김) → 800 clamp 박혀 화면 가득
+    #   - 주원단 vb 비율 0.684 (가로 김) → 478
+    #   - 시각 크기 다름 → 사장님 본질 위반
+    #
+    # 정정 본문: max_vb_w_all 박힌 마카 (제원단 추정) vb_h/vb_w 기준 h_px 박음.
+    #   모든 마카 동일 h_px. viewBox 비율 다른 마카 (포켓팅) 는 컨테이너 안에서
+    #   viewBox 작게 박힘 (xMidYMid meet 박혀있어 좌우 여백 자동).
     _MARKER_VB_RE = re.compile(
         r'viewBox\s*=\s*"\s*[\-0-9.]+\s+[\-0-9.]+\s+([\-0-9.]+)\s+([\-0-9.]+)"'
     )
+    vb_dims_by_mat: dict[str, tuple[float, float]] = {}
+    for _mat in materials_ordered:
+        _res = by_material.get(_mat)
+        if not _res:
+            continue
+        _svg = _res.get("svg_content_humanized") or _res.get("svg_content", "")
+        if not _svg:
+            continue
+        _m = _MARKER_VB_RE.search(_svg)
+        if _m:
+            vb_dims_by_mat[_mat] = (float(_m.group(1)), float(_m.group(2)))
+
+    max_vb_w_all = max((vw for vw, _ in vb_dims_by_mat.values()), default=1.0)
+    ref_vb_h: float | None = None
+    for _w, _h in vb_dims_by_mat.values():
+        if abs(_w - max_vb_w_all) < 1e-6:
+            ref_vb_h = _h
+            break
+
+    # 모든 마카 동일 h_px (for 루프 밖 한 번만 계산 — 본질 정석).
+    # 사장님 본질 #2 "제원단과 동일 비율" + #5 "마카 = 본사처럼 한눈에" 동시 박음.
+    if ref_vb_h is None or max_vb_w_all <= 0:
+        h_px_uniform = 480
+    else:
+        h_px_uniform = max(240, min(800, int(700 * ref_vb_h / max_vb_w_all)))
 
     # ── 재질별 상세 카드 ──
     for mat in materials_ordered:
@@ -2284,26 +2318,10 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             except Exception:
                 pass  # dump 실패는 무시 (UI 영향 X)
         if svg:
-            _vb_m = _MARKER_VB_RE.search(svg)
-            if _vb_m:
-                vb_w = float(_vb_m.group(1))
-                vb_h = float(_vb_m.group(2))
-                # 사장님 본질 정정 2026-05-11: 각 마카 컨테이너 100% width 박음.
-                # px/cm 통일 본문 폐기 → 안감 piece 가 주원단보다 작아 보이는 본질 해소.
-                # 사장님 본질 #5: "마카 = 본사처럼 한눈에" (가로 1줄 본사 컨벤션).
-                #
-                # h_px 본질 정정 2026-05-11 (포켓팅 적발):
-                # - 1.25 배 마진 제거: viewBox 정정 (add_axis_labels_to_svg) 본질
-                #   박힌 후 축 라벨 영역이 이미 viewBox 안. 추가 마진 박혀 화면 한눈에 X.
-                # - clamp 1200 → 800: 사장님 본질 #5 "한눈에" 우선. 포켓팅 h_px=1278
-                #   → 1200 clamp 박혀있던 본질이 너무 큼 → 800 clamp 박음.
-                if vb_w > 0:
-                    h_px = max(240, min(800, int(700 * vb_h / vb_w)))
-                else:
-                    h_px = 480
-                st.components.v1.html(svg, height=h_px, scrolling=False)
-            else:
-                st.components.v1.html(svg, height=480, scrolling=False)
+            # 모든 마카 동일 h_px (사장님 본질 "제원단과 동일 비율" 2026-05-11 14:16).
+            # h_px_uniform 박힌 본문은 for 루프 위에서 한 번만 계산. 작은 마카는
+            # 컨테이너 안에서 viewBox 작게 박힘 (xMidYMid meet 좌우 여백 자동).
+            st.components.v1.html(svg, height=h_px_uniform, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
 
