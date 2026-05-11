@@ -5,3 +5,4 @@ matplotlib>=3.7
 pandas>=2.0
 reportlab>=4.0
 openpyxl>=3.1
+rectpack>=0.2.2
