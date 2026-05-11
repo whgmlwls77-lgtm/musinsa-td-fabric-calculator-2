@@ -123,6 +123,59 @@ class TestGrainArrows(unittest.TestCase):
         # polygon 화살촉 동적 생성
         self.assertIn('<polygon points=', out)
 
+    def test_arrow_direction_unified_under_180_rotation(self):
+        """이슈 1 정정 (사장님 캡쳐 raw 2026-05-08): 식서 양방향 본질 — sparrow
+        가 piece 를 180° 회전 배치해도 화살표는 마카 좌표계 +Y (↓) 통일.
+        본사 컨벤션 "모두 한 방향" 일치 (2WAY 시 ↓↑ 혼재 폐기).
+
+        sparrow native transform 본질 (2026-05-11 정정): rot=180 piece 의
+        anchor (x_cm/y_cm) 는 bbox 우상단. 같은 piece bbox 좌하단=(0,0) 표현
+        위해 rot=0 → (0,0), rot=180 → (bw, bh) 박음.
+        """
+        placements_0 = [{
+            "piece_id": "P_a", "x_cm": 0, "y_cm": 0,
+            "bbox_w_cm": 10, "bbox_h_cm": 20,
+            "kind": "STRAIGHT_GRAIN_Y", "rotation_applied_deg": 0,
+        }]
+        placements_180 = [{
+            "piece_id": "P_b", "x_cm": 10, "y_cm": 20,
+            "bbox_w_cm": 10, "bbox_h_cm": 20,
+            "kind": "STRAIGHT_GRAIN_Y", "rotation_applied_deg": 180,
+        }]
+        out_0 = add_grain_arrows_to_svg(SAMPLE_SVG, placements_0)
+        out_180 = add_grain_arrows_to_svg(SAMPLE_SVG, placements_180)
+        # rot=0 → end=(5, 12) ↓ / rot=180 → anchor 보정 후 동일 piece 위치 → (5, 12) ↓
+        self.assertIn('<polygon points="5.000,12.000', out_0)
+        self.assertIn('<polygon points="5.000,12.000', out_180)
+        # 두 화살표 polygon 좌표 일치 (방향 통일 + anchor 보정 본질 입증)
+        poly_0 = re.search(r'<polygon points="([^"]+)"', out_0).group(1)
+        poly_180 = re.search(r'<polygon points="([^"]+)"', out_180).group(1)
+        self.assertEqual(poly_0, poly_180)
+
+    def test_arrow_direction_unified_grain_x_with_rotation(self):
+        """STRAIGHT_GRAIN_X (수평 식서) — 회전 0° vs 180° 화살표 방향 동일.
+
+        sparrow native transform 본질 (2026-05-11): rot=180 piece anchor =
+        bbox 우상단 → 같은 piece bbox 좌하단=(0,0) 표현 위해 (bw, bh) 박음.
+        """
+        # GRAIN_X 회전 0° → base (1,0) → dx=1, dy=0, dx>0 (정상)
+        # GRAIN_X 회전 180° → (-1, 0) → dx<-eps & dy≈0 → 부호 반전 → (1, 0)
+        placements_0 = [{
+            "piece_id": "Px_a", "x_cm": 0, "y_cm": 0,
+            "bbox_w_cm": 20, "bbox_h_cm": 10,
+            "kind": "STRAIGHT_GRAIN_X", "rotation_applied_deg": 0,
+        }]
+        placements_180 = [{
+            "piece_id": "Px_b", "x_cm": 20, "y_cm": 10,
+            "bbox_w_cm": 20, "bbox_h_cm": 10,
+            "kind": "STRAIGHT_GRAIN_X", "rotation_applied_deg": 180,
+        }]
+        out_0 = add_grain_arrows_to_svg(SAMPLE_SVG, placements_0)
+        out_180 = add_grain_arrows_to_svg(SAMPLE_SVG, placements_180)
+        poly_0 = re.search(r'<polygon points="([^"]+)"', out_0).group(1)
+        poly_180 = re.search(r'<polygon points="([^"]+)"', out_180).group(1)
+        self.assertEqual(poly_0, poly_180)
+
     def test_stroke_width_dynamic_to_arrow_length(self):
         """stroke-width 가 화살표 길이의 4% 비례 — piece 크기 무관 가림 X."""
         # 큰 piece (bbox 100cm) → arrow_len 40 → stroke 1.6

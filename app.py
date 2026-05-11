@@ -2157,17 +2157,16 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
     table_rows = []
     for r in summary_rows:
         n_pat = r["pieces_count"]
-        n_mir = r["mirror_count"]
-        tg = r.get("total_garments", 1)
-        per_garment = n_pat + n_mir
-        n_total = per_garment * (tg if tg > 1 else 1)
+        tg = r.get("total_garments", 1) or 1
+        n_total = r.get("placements_total", 0)
+        per_garment = r.get("placements_per_garment", 0)
         row_dict = {
             "재질": r["material"],
             "원단 폭": f"{r['fabric_width_cm']:.0f} cm",
             "마카 길이": f"{r['marker_length_cm']:.1f} cm",
             "마카 요척": f"{r['marker_length_yd']:.2f} yd",
             "패턴 갯수": f"{n_pat}",
-            "마카 갯수": f"{n_total}",
+            "마카 갯수": f"{n_total}" + (f" (1벌당 {per_garment})" if tg > 1 else ""),
             "효율": f"{r['efficiency_pct']:.1f} %",
             "처리 시간": f"{r['runtime_actual_sec']:.0f}s",
         }
@@ -2182,27 +2181,11 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
 
     st.divider()
 
-    # ── 모든 마카 viewBox 사전 수집 (이슈 3 — 사장님 본질 2026-05-08) ──
-    # 마카별 px/cm 통일: 가장 큰 마카 폭 (max_vb_w_all) 을 컨테이너 100% 기준으로 잡고,
-    # 작은 마카는 (vb_w / max_vb_w_all) 비례 width 로 표시 → piece 시각 비율 정확.
-    # (모든 마카 컨테이너 100% width 시 안감 piece 가 주원단 piece 보다 커 보이는 왜곡 정정.)
+    # ── 마카 viewBox 추출 정규식 (각 마카 자체 비율 박음) ──
+    # 사장님 본질 정정 2026-05-11: px/cm 통일 본문 폐기. 안감/주원단 따로 보는 본질
+    # (사장님 본질 #5 "마카 = 본사처럼 한눈에") 우선 → 각 마카 컨테이너 100% width.
     _MARKER_VB_RE = re.compile(
         r'viewBox\s*=\s*"\s*[\-0-9.]+\s+[\-0-9.]+\s+([\-0-9.]+)\s+([\-0-9.]+)"'
-    )
-    vb_dims_by_mat: dict[str, tuple[float, float]] = {}
-    for _mat in materials_ordered:
-        _res = by_material.get(_mat)
-        if not _res:
-            continue
-        _svg = _res.get("svg_content_humanized") or _res.get("svg_content", "")
-        if not _svg:
-            continue
-        _m = _MARKER_VB_RE.search(_svg)
-        if _m:
-            vb_dims_by_mat[_mat] = (float(_m.group(1)), float(_m.group(2)))
-    max_vb_w_all = max(
-        (vw for vw, _ in vb_dims_by_mat.values()),
-        default=1.0,
     )
 
     # ── 재질별 상세 카드 ──
@@ -2288,27 +2271,32 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
         # SVG 시각화 (한글 라벨) — 화면에만 표시. 다운로드는 PDF 한 가지로 통합 (작업 5).
         # iframe 가로 스크롤 X + 잘림 X (사장님 본질 2026-05-06 + 2026-05-07 + 2026-05-08).
         svg = res.get("svg_content_humanized") or res.get("svg_content", "")
+        # raw 적발 보험 — svg 파일 dump (2026-05-11, 배치도 끝부분 잘림 진단용).
+        # 클로드 코드가 workspace/scratch/last_svg_{mat}.svg 직접 raw 검증 가능.
+        # viewBox 정정 효과 OK 면 다음 commit 으로 dump 폐기.
         if svg:
-            dims = vb_dims_by_mat.get(mat)
-            if dims and max_vb_w_all > 0:
-                vb_w, vb_h = dims
-                # px/cm 통일 (이슈 3 본질 — 사장님 캡쳐 raw 정정 2026-05-08).
-                # 가장 큰 마카 폭이 컨테이너 100% 기준 → 작은 마카는 비례 width 로 표시.
-                ratio = vb_w / max_vb_w_all  # 0 < ratio ≤ 1
-                width_pct = ratio * 100.0
-                # iframe height = max_vb_w_all 기준 (모든 마카 동일 px/cm 보장).
-                # 잘림 방지 마진 ×1.25 (이슈 2 통일).
-                h_px = max(
-                    240,
-                    min(1200, int(700 * vb_h / max_vb_w_all * 1.25)),
-                )
-                # wrapper div 로 width 비례 — iframe 안에서 SVG 가 좌측 ratio% 만 차지.
-                # SVG 자체는 width="100%" + xMidYMid meet 이라 wrapper 비율 따라 그려짐.
-                wrapper_html = (
-                    f'<div style="width:{width_pct:.2f}%; '
-                    f'margin:0; padding:0;">{svg}</div>'
-                )
-                st.components.v1.html(wrapper_html, height=h_px, scrolling=False)
+            try:
+                from pathlib import Path as _DumpPath
+                _dump_dir = _DumpPath("workspace/scratch")
+                _dump_dir.mkdir(parents=True, exist_ok=True)
+                _safe_mat = "".join(c if c.isalnum() else "_" for c in mat)
+                (_dump_dir / f"last_svg_{_safe_mat}.svg").write_text(svg, encoding="utf-8")
+            except Exception:
+                pass  # dump 실패는 무시 (UI 영향 X)
+        if svg:
+            _vb_m = _MARKER_VB_RE.search(svg)
+            if _vb_m:
+                vb_w = float(_vb_m.group(1))
+                vb_h = float(_vb_m.group(2))
+                # 사장님 본질 정정 2026-05-11: 각 마카 컨테이너 100% width 박음.
+                # px/cm 통일 본문 폐기 → 안감 piece 가 주원단보다 작아 보이는 본질 해소.
+                # 사장님 본질 #5: "마카 = 본사처럼 한눈에" (가로 1줄 본사 컨벤션).
+                # h_px 은 각 마카 자체 vb_h/vb_w 비율 박음 (잘림 마진 ×1.25).
+                if vb_w > 0:
+                    h_px = max(240, min(1200, int(700 * vb_h / vb_w * 1.25)))
+                else:
+                    h_px = 480
+                st.components.v1.html(svg, height=h_px, scrolling=False)
             else:
                 st.components.v1.html(svg, height=480, scrolling=False)
         else:

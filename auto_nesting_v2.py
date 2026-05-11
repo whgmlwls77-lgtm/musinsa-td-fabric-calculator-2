@@ -849,6 +849,42 @@ def humanize_svg_labels(svg_content: str) -> str:
 _SVG_VIEWBOX_RE = re.compile(r'viewBox="([\-0-9.]+)\s+([\-0-9.]+)\s+([\-0-9.]+)\s+([\-0-9.]+)"')
 
 
+def _placement_bbox_min(pl: dict) -> tuple[float, float]:
+    """sparrow native transform `translate(tx,ty) rotate(R)` 본질 적용 후
+    piece bbox 의 (min_x, min_y) 반환.
+
+    sparrow 가 SVG `<use transform="translate(tx,ty) rotate(R)">` 로 piece 배치.
+    rotate 가 origin (0,0) 기준 적용 후 translate → piece anchor (회전 후 원점)
+    위치 = (tx, ty). placements 의 x_cm/y_cm = tx/ty (sparrow native).
+
+    rotation 별 회전 후 bbox 좌하단 (placements bw/bh 는 회전 후 가로/세로):
+      R=0°    : anchor = bbox 좌하단      → min = (tx, ty)
+      R=180°  : anchor = bbox 우상단      → min = (tx-bw, ty-bh)
+      R=90°   : anchor = bbox 우하단      → min = (tx-bw, ty)
+      R=270°  : anchor = bbox 좌상단      → min = (tx, ty-bh)
+
+    사장님 raw 적발 (2026-05-11): 안감 use[1]=translate(111.385,17.614) rotate(-180),
+    placements x_cm=111.385/y_cm=17.614, bw=53.23/bh=17.61. 이전 본문 (cx=x+bw/2)
+    은 cx=138.0 (실제 line 중심 137.37 와 일치) → piece 실제 bbox 우측(111.39) +27 밖.
+    """
+    x = float(pl.get("x_cm", 0.0))
+    y = float(pl.get("y_cm", 0.0))
+    bw = float(pl.get("bbox_w_cm", 0.0))
+    bh = float(pl.get("bbox_h_cm", 0.0))
+    rot = float(pl.get("rotation_applied_deg", 0.0))
+    r = ((rot % 360.0) + 360.0) % 360.0
+    if r < 1.0 or r > 359.0:
+        return (x, y)
+    if abs(r - 180.0) < 1.0:
+        return (x - bw, y - bh)
+    if abs(r - 90.0) < 1.0:
+        return (x - bw, y)
+    if abs(r - 270.0) < 1.0:
+        return (x, y - bh)
+    # 0/90/180/270 외 — 보수적으로 anchor 그대로 (sparrow 가 90 단위 외 적용 X)
+    return (x, y)
+
+
 def _piece_grain_arrow_direction(grain_kind: str, rotation_deg: float) -> tuple[float, float] | None:
     """
     piece 의 grain.kind 와 sparrow 가 적용한 회전을 보고 식서 화살표 단위벡터(dx, dy) 반환.
@@ -924,8 +960,6 @@ def add_grain_arrows_to_svg(
         kind = pl.get("kind", "UNKNOWN")
         if kind in ("UNKNOWN", "NONSTANDARD", None, ""):
             continue
-        x = float(pl.get("x_cm", 0.0))
-        y = float(pl.get("y_cm", 0.0))
         bw = float(pl.get("bbox_w_cm", 0.0))
         bh = float(pl.get("bbox_h_cm", 0.0))
         rot = float(pl.get("rotation_applied_deg", 0.0))
@@ -933,8 +967,12 @@ def add_grain_arrows_to_svg(
         if bw <= 0 or bh <= 0:
             continue
 
-        cx = x + bw / 2.0
-        cy = y + bh / 2.0
+        # 사장님 raw 적발 (2026-05-11): rotation=±180 piece anchor 보정 본질 박음
+        # → _placement_bbox_min 헬퍼 박혀 회전 후 bbox 좌하단 정확 (이전 본문은
+        #   회전 무시 → R=180 piece center 가 실제 piece 우측 밖 박혔음).
+        bbx, bby = _placement_bbox_min(pl)
+        cx = bbx + bw / 2.0
+        cy = bby + bh / 2.0
 
         direction = _piece_grain_arrow_direction(kind, rot)
         if direction is None:
@@ -993,6 +1031,7 @@ def add_axis_labels_to_svg(
     svg_content: str,
     fabric_width_cm: float,
     marker_length_cm: float,
+    placements: list[dict] | None = None,
 ) -> str:
     """
     SVG 컨테이너 외곽에 축 라벨 + 화살표 추가.
@@ -1020,12 +1059,38 @@ def add_axis_labels_to_svg(
     fs = max(2.5, marker_length_cm * 0.025)
     pad = fs * 1.6  # 라벨 영역 padding
 
-    # 새 viewBox: 좌측·우측·상단·하단 모두 확장 (사장님 캡쳐 raw 잘림 방지 2026-05-07).
-    # 외부 화살표/라벨이 viewBox 밖으로 나가지 않도록 padding 강화.
+    # 새 viewBox 본질 (사장님 raw 적발 2026-05-11):
+    # sparrow native transform 의 회전 anchor 본질 적용 후 진짜 piece bbox 계산.
+    # _placement_bbox_min 헬퍼 본질 박혀 R=0/180/90/270 모두 정확. 이전 본문 (x+bw)
+    # 은 R=180 piece 우측 끝 오버계산 → viewBox 가 빈 우측 영역까지 확장돼 마카 작게 표시.
+    if placements:
+        max_x_min_y = []
+        for pl in placements:
+            bw = float(pl.get("bbox_w_cm", 0.0))
+            bh = float(pl.get("bbox_h_cm", 0.0))
+            if bw <= 0 or bh <= 0:
+                continue
+            bbx, bby = _placement_bbox_min(pl)
+            max_x_min_y.append((bbx + bw, bby + bh, min(bw, bh)))
+        if max_x_min_y:
+            max_x = max(t[0] for t in max_x_min_y)
+            max_y = max(t[1] for t in max_x_min_y)
+            # 식서 화살표 head margin (bbox 짧은변의 30% — 안전 폭)
+            head_margin = max(t[2] for t in max_x_min_y) * 0.3
+        else:
+            max_x = vb_x + vb_w
+            max_y = vb_y + vb_h
+            head_margin = 0.0
+        content_right = max(vb_x + vb_w, max_x + head_margin, marker_length_cm)
+        content_bottom = max(vb_y + vb_h, max_y + head_margin, fabric_width_cm)
+    else:
+        content_right = vb_x + vb_w
+        content_bottom = vb_y + vb_h
+
     new_x = vb_x - pad * 2.0
     new_y = vb_y - pad * 1.5
-    new_w = vb_w + pad * 2.0 + pad * 1.0  # 좌측 + 우측 여유
-    new_h = vb_h + pad * 1.5 + pad * 2.0  # 상단 + 하단 라벨 여유
+    new_w = (content_right - new_x) + pad * 2.0  # 우측 라벨/화살표 여유
+    new_h = (content_bottom - new_y) + pad * 2.5  # 하단 가로축 라벨 영역
 
     new_viewbox = f'viewBox="{new_x:.3f} {new_y:.3f} {new_w:.3f} {new_h:.3f}"'
     svg_content = _SVG_VIEWBOX_RE.sub(new_viewbox, svg_content, count=1)
@@ -1206,6 +1271,7 @@ def annotate_marker_svg(
     if fabric_width_cm is not None and marker_length_cm is not None:
         svg_content = add_axis_labels_to_svg(
             svg_content, fabric_width_cm, marker_length_cm,
+            placements=placements,
         )
         # piece 라벨 축소 (마카 길이 기반)
         svg_content = shrink_piece_labels(svg_content, marker_length_cm)
