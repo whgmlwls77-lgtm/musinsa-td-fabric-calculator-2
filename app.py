@@ -2318,11 +2318,21 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             except Exception:
                 pass  # dump 실패는 무시 (UI 영향 X)
         if svg:
-            # 모든 마카 동일 h_px (사장님 본질 "제원단과 동일 비율" 2026-05-11 14:16).
-            # h_px_uniform 박힌 본문은 for 루프 위에서 한 번만 계산. 작은 마카는
-            # 컨테이너 안에서 viewBox 작게 박힘 (xMidYMid meet 좌우 여백 자동).
-            # iframe 자체 width=1200 박음 (사장님 본질 "stretched X" 정정 2026-05-13).
-            st.components.v1.html(svg, width=1200, height=h_px_uniform, scrolling=False)
+            # 6yd 기준 1200px 박음 (사장님 본질 정정 2026-05-13):
+            #   PX_PER_CM = 1200 / (6 yd × 91.44 cm/yd) = 2.187
+            #   container/SVG 모두 실제 px 박음 (width 100% 폐기 → stretched X).
+            #   1yd ↔ 200px 박힌 본문 = 본사 컨벤션 "한눈에" + 비율 일정.
+            PX_PER_CM = 1200 / (6 * 91.44)  # = 2.187
+            fabric_width_cm = row['fabric_width_cm']
+            marker_length_cm = row['marker_length_cm']
+            container_width_px = 1200  # 고정 (6yd 기준)
+            container_height_px = max(80, int(fabric_width_cm * PX_PER_CM) + 80)  # 라벨 padding
+            # SVG width/height 100% 폐기 → 실제 px 박음.
+            svg_width_px = int(marker_length_cm * PX_PER_CM) + 100
+            svg_height_px = int(fabric_width_cm * PX_PER_CM) + 80
+            svg = re.sub(r'width="100%"', f'width="{svg_width_px}"', svg)
+            svg = re.sub(r'height="100%"', f'height="{svg_height_px}"', svg)
+            st.components.v1.html(svg, width=container_width_px, height=container_height_px, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
 
