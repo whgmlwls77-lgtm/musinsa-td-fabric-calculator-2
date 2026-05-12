@@ -2321,7 +2321,9 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             # 모든 마카 동일 h_px (사장님 본질 "제원단과 동일 비율" 2026-05-11 14:16).
             # h_px_uniform 박힌 본문은 for 루프 위에서 한 번만 계산. 작은 마카는
             # 컨테이너 안에서 viewBox 작게 박힘 (xMidYMid meet 좌우 여백 자동).
-            st.components.v1.html(svg, height=h_px_uniform, scrolling=False)
+            # wrapper div max-width 1200px (사장님 본질 "stretched X" 정정 2026-05-12).
+            svg_wrapped = f'<div style="max-width:1200px; margin:0 auto;">{svg}</div>'
+            st.components.v1.html(svg_wrapped, height=h_px_uniform, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
 
