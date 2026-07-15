@@ -184,30 +184,46 @@ def extract_grain(block, grain_layer: str | None) -> dict | None:
 # ╔════════════════════════════════════════════════════════════╗
 # ║ 3. 식서 정렬용 회전                                         ║
 # ╚════════════════════════════════════════════════════════════╝
+def grain_rotation_deg(grain_line_angle_mod180: float) -> float:
+    """결방향 선을 원단 X축(원단 길이방향)에 정렬하기 위한 조각 회전각(°).
+
+    사장님 확정 원리 (2026-07-13):
+      결방향 선 = 옷의 실제 축 표시. 협력사가 조각을 임의 각도로 배치해도
+      결방향 선은 진짜 방향을 가리킴. 시스템은 결방향 선의 CAD 각도가 무엇이든
+      그대로 X축(0°)에 정렬 — 스냅/분류/허용오차 없음 (CAD 는 오차 없음).
+      바이어스도 별도 처리 X — 결방향 선을 X축에 맞추면 조각이 자연히 사선 배치됨.
+
+    Args:
+        grain_line_angle_mod180: 결방향 선의 CAD 각도 (0~180, mod 180)
+    Returns:
+        조각을 이 각도만큼 회전 → 결방향 선이 X축(0°)에 정확히 정렬.
+        rotate_polygon 은 양수=반시계 → -angle 회전 시 CAD 각도 angle 선이 0° 로.
+
+    예: 0→0, 90→-90, 107.5→-107.5, 111.5→-111.5, 45→-45, 65.4→-65.4, 135→-135.
+    """
+    return -float(grain_line_angle_mod180)
+
+
 def get_alignment_rotation(grain: dict | None) -> float:
     """피스를 식서 가로(X축, sparrow strip 길이방향)로 통일하기 위한 회전 각도(도).
     양수=반시계, 음수=시계.
 
-    사장님 본질 (2026-05-08 정정): 식서 = 원단 길이방향 = 마카 가로 (→).
+    사장님 재설계 (2026-07-13): 결방향 선의 실측 각도(angle_deg)를 그대로 사용.
+      결방향 선의 CAD 각도가 무엇이든 X축(원단 길이방향)에 정렬 → 임의 각도 지원.
+      이전 kind 기반 4분류(X/Y/BIAS/NONSTANDARD) → 스냅 폐기 (107.5°/65.4° 등 정확 처리).
+
+    사장님 본질 (2026-05-08): 식서 = 원단 길이방향 = 마카 가로 (→).
     sparrow strip 좌표계: X축 = 마카 길이 (무한 성장), Y축 = 원단 폭.
-    → STRAIGHT_GRAIN_X 가 정상 식서 — 그대로 배치.
 
-      STRAIGHT_GRAIN_X → 0°    (이미 식서 가로 = 정상)
-      STRAIGHT_GRAIN_Y → 90°   (반시계 90° 회전 → 식서 X 통일)
-      BIAS             → 0°    (45° 그대로 유지)
-      UNKNOWN          → 0°    (caller 가 STRAIGHT_GRAIN_X 가정 + 경고)
-      NONSTANDARD      → 0°    (caller 가 경고)
-
-    회전 0° = "DXF 에 그려진 그대로 배치". rectpack 의 rotation 파라미터와
-    독립적인 사전처리. 의류에 없는 90° 또는 임의 회전은 절대 반환하지 않는다.
+    grain 없음 / angle_deg 없음 → 0.0 (DXF 그대로 배치, 회전 안 함).
+    회전 0° = "DXF 에 그려진 그대로 배치". sparrow orientation 과 독립적인 사전처리.
     """
     if not grain:
         return 0.0
-    kind = grain.get("kind", "UNKNOWN")
-    if kind == "STRAIGHT_GRAIN_Y":
-        return 90.0
-    # STRAIGHT_GRAIN_X / BIAS / UNKNOWN / NONSTANDARD 모두 0°
-    return 0.0
+    ang = grain.get("angle_deg")
+    if ang is None:
+        return 0.0
+    return grain_rotation_deg(float(ang))
 
 
 def estimate_grain_from_bbox(width: float, height: float) -> dict:

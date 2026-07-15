@@ -62,12 +62,20 @@ from dxf_diagnosis import (
     run_full_diagnosis,
     build_coop_message,
     apply_unit_correction_50cm_box,  # 옵션 A 자동 보정 (사장님 결정 2026-05-07)
+    move_scale_box_to_excluded,  # 스케일 박스 material 무관 자동 제외 (사장님 2026-07-15)
     STATUS_LABEL,
     STATUS_EMOJI,
     OK as DIAG_OK,
     WARN as DIAG_WARN,
     FAIL as DIAG_FAIL,
 )
+from piece_thumbnail import (
+    render_piece_thumbnail_svg,
+    svg_data_uri,
+    material_border_color,
+    MATERIAL_BORDER_COLOR,
+)
+from pp_vs_main_compare import compare_pp_vs_main, SHAPE_MATCH_THRESHOLD
 from auto_nesting import nest_grading_marker, visualize_marker
 from auto_nesting_v2 import (
     nest_grading_marker_sparrow,
@@ -242,6 +250,11 @@ SIZE_ORDER: dict[str, int] = {
 
 M_TO_YD = 1.0936
 CM_TO_INCH = 1.0 / 2.54
+
+# 도형 매칭 재확인 상한 — 임계값 바로 위 0.05 구간 = 사장님 재확인 필요 → 노란 배경.
+# 사장님 원사양 "낮은 유사도 0.75~0.80" (당시 임계값 0.75) 의 구간 폭을 그대로 유지.
+# 임계값이 시스템 표준(0.85)으로 확정됐으므로 상수에서 파생 → 0.85~0.90 이 재확인 구간.
+SHAPE_LOW_SIM_CEIL = SHAPE_MATCH_THRESHOLD + 0.05
 
 # BLK_X_Y 패턴 — SuperALPHA_Plus / Gerber 등이 쓰는 블록 명명 규칙.
 BLK_PATTERN = re.compile(r"^BLK_(\d+)_(\d+)$", re.IGNORECASE)
@@ -1044,6 +1057,10 @@ def parse_dxf_v3(file_bytes: bytes, file_name: str) -> dict:
         # 박스 없거나 측정 정상이면 no-op.
         result = apply_unit_correction_50cm_box(result)
 
+        # 감지된 스케일 박스를 material 무관하게 pieces → excluded 이동 (사장님 2026-07-15).
+        # Material:SELF 로 저장된 스케일 박스도 제외 → PP vs 메인 조각 대칭 보존.
+        result = move_scale_box_to_excluded(result)
+
         return result
     finally:
         try:
@@ -1141,7 +1158,7 @@ def diagnosis_section(parsed: dict) -> None:
 
     # 5대 카테고리 status 카운트 (raw_table/violations 는 list 이므로 제외).
     # 사장님 본질 (2026-05-07): [5] DXF 스케일 검증 추가 — 50cm × 50cm 박스 절대 기준.
-    _status_keys = ("grain", "material", "panel", "quantity", "scale")
+    _status_keys = ("grain", "material", "encoding", "quantity", "scale")
     n_fail = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_FAIL)
     n_warn = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_WARN)
     n_ok = sum(1 for k in _status_keys if diag[k]["status"] == DIAG_OK)
@@ -1162,7 +1179,7 @@ def diagnosis_section(parsed: dict) -> None:
     labels = [
         ("grain",    "[1] 결방향 (식서/푸서/바이어스)"),
         ("material", "[2] 원단 표기 (주원단/안감/포켓팅/배색/논)"),
-        ("panel",    "[3] 패널 정보 (앞판/뒤판/사이바 등)"),
+        ("encoding", "[3] 텍스트 인코딩 (영문/숫자 표기 — 비ASCII 감지)"),
         ("quantity", "[4] 수량 / 좌우 대칭"),
         ("scale",    "[5] DXF 스케일 검증 (50cm × 50cm 비율 박스)"),
     ]
@@ -1246,11 +1263,64 @@ def size_selection_section(parsed: dict) -> list[str]:
     return selected
 
 
+def _target_sizes_from_opts(opts: dict) -> list[str]:
+    """nesting_section 결과(opts)에서 산출 대상 사이즈 목록 추출.
+
+    - 복수 사이즈 (size_ratio dict) → 그 키들
+    - 단일 사이즈 (size_ratio None) → [base_size]
+    - 빈 결과면 [] (필터 미적용 = 전체 표시)
+
+    재질 매핑 UI 를 실제 산출 대상 사이즈로 필터하는 데 사용 (사장님 지시 2026-07-13).
+    """
+    size_ratio = opts.get("size_ratio")
+    if size_ratio:
+        return list(size_ratio.keys())
+    base = opts.get("base_size")
+    return [base] if base else []
+
+
+@st.cache_data(show_spinner=False)
+def _thumbnail_uri_cached(coords_key: tuple, size_px: int, border_color: str) -> str:
+    """coords/size/색 → base64 SVG data URI. @st.cache_data 로 재렌더 캐싱.
+
+    사장님 지시 [5] 성능 대응: 산출 사이즈 여러 개 → 100+ piece 여도
+    동일 (coords, size, 색) 은 캐시 hit (SVG 문자열 재생성 X).
+    """
+    svg = render_piece_thumbnail_svg(
+        {"coords_cm": [list(c) for c in coords_key]},
+        size_px=size_px, border_color=border_color,
+    )
+    return svg_data_uri(svg)
+
+
+def _render_piece_thumbnail(piece: dict, material: str | None, size_px: int = 150) -> None:
+    """piece 썸네일을 Streamlit 에 표시 (재질 색 테두리). 도형 없으면 placeholder."""
+    coords = piece.get("coords_cm") or []
+    if len(coords) < 3:
+        st.markdown(
+            f'<div style="width:{size_px}px;height:{size_px}px;display:flex;'
+            f'align-items:center;justify-content:center;background:#fafafa;'
+            f'border:1px dashed #ccc;border-radius:6px;color:#aaa;font-size:11px;">'
+            f'도형 없음</div>',
+            unsafe_allow_html=True,
+        )
+        return
+    color = material_border_color(material)
+    coords_key = tuple((round(float(x), 2), round(float(y), 2)) for x, y in coords)
+    uri = _thumbnail_uri_cached(coords_key, size_px, color)
+    st.markdown(
+        f'<img src="{uri}" width="{size_px}" height="{size_px}" '
+        f'style="display:block;border:1px solid #eee;border-radius:6px;" '
+        f'alt="piece 썸네일"/>',
+        unsafe_allow_html=True,
+    )
+
+
 # ╔════════════════════════════════════════════════════════════╗
 # ║ UI — 수동 재질 분류 섹션 (사장님 절대 원칙)                 ║
 # ║ DXF Material 코드 누락 시 사용자 입력 + 매핑 사전 저장      ║
 # ╚════════════════════════════════════════════════════════════╝
-def material_mapping_section(parsed: dict) -> dict:
+def material_mapping_section(parsed: dict, target_sizes: list[str] | None = None) -> dict:
     """
     수동 재질 분류 UI. DXF Material 메타 보유율 검사 → 누락 시 사용자 입력.
 
@@ -1272,14 +1342,25 @@ def material_mapping_section(parsed: dict) -> dict:
     pieces = parsed["pieces"]
     style = parsed.get("style", "") or ""
 
-    # ── Material 보유율 검사 ───────────────────────────────────────
+    # ── 산출 대상 사이즈만 UI 표시 (사장님 지시 2026-07-13) ────────
+    # 산출 방식(nesting_section)에서 확정된 사이즈의 piece 만 매핑 UI에 노출.
+    # 그룹(부위 토큰) 단위 매핑은 아래 override 루프(전체 piece 순회)에서 모든
+    # 사이즈에 전파되므로, 표시만 필터해도 비대상 사이즈 piece 의 재질 분류는 누락 X.
+    if target_sizes:
+        display_pieces = [p for p in pieces if p.get("size") in target_sizes]
+        if not display_pieces:  # 사이즈 메타 없는 케이스 안전장치 → 전체 표시
+            display_pieces = pieces
+    else:
+        display_pieces = pieces
+
+    # ── Material 보유율 검사 (DXF 전체 기준) ───────────────────────
     n = len(pieces)
     n_with_mat = sum(1 for p in pieces if (p.get("material_raw") or "").strip())
     coverage = n_with_mat / n if n else 0.0
 
-    # ── 부위 토큰 그룹핑 (같은 약자 = 같은 그룹) ───────────────────
+    # ── 부위 토큰 그룹핑 (같은 약자 = 같은 그룹, 표시 대상만) ──────
     token_groups: dict[str, list[dict]] = {}
-    for p in pieces:
+    for p in display_pieces:
         tok = normalize_piece_token(p.get("piece_name") or "", style)
         token_groups.setdefault(tok, []).append(p)
 
@@ -1319,10 +1400,17 @@ def material_mapping_section(parsed: dict) -> dict:
         )
 
     n_tokens = len(token_groups)
-    st.caption(
-        f"📦 **{n_tokens}개 부위 그룹** × 사이즈별 = 총 {n} piece — "
-        f"부위별로 한 번만 선택하면 같은 부위 모든 사이즈에 자동 적용."
-    )
+    n_display = sum(len(g) for g in token_groups.values())
+    if target_sizes and n_display != n:
+        st.caption(
+            f"📦 **{n_tokens}개 부위 그룹** · 산출 대상 사이즈(`{', '.join(target_sizes)}`) "
+            f"{n_display} piece 표시 — 부위별로 한 번만 선택하면 같은 부위 모든 사이즈에 자동 적용."
+        )
+    else:
+        st.caption(
+            f"📦 **{n_tokens}개 부위 그룹** × 사이즈별 = 총 {n} piece — "
+            f"부위별로 한 번만 선택하면 같은 부위 모든 사이즈에 자동 적용."
+        )
 
     if style_map or global_map:
         recs = []
@@ -1359,11 +1447,15 @@ def material_mapping_section(parsed: dict) -> dict:
             sample_name = grp[0].get("piece_name") or ""
             from_dict = (tok in style_map) or (tok in global_map)
             label_suffix = " 💡" if from_dict else ""
+            grp_key = f"mat_map__{style}__{tok}"
+            # 대표 썸네일 (그룹 첫 piece — 같은 부위는 모양 유사). 재질 색 즉시 반영.
+            cur_grp_sel = st.session_state.get(grp_key, default)
+            _render_piece_thumbnail(grp[0], cur_grp_sel, size_px=80)
             choice = st.selectbox(
                 f"**{tok}** — {len(grp)}개 사이즈{label_suffix}",
                 MATERIAL_OPTIONS,
                 index=idx,
-                key=f"mat_map__{style}__{tok}",
+                key=grp_key,
                 help=(
                     f"piece_name 예: {sample_name}"
                     + ("\n💡 매핑 사전 추천값" if from_dict else "")
@@ -1402,20 +1494,31 @@ def material_mapping_section(parsed: dict) -> dict:
                     with cols_e[j % len(cols_e)]:
                         size_lbl = p.get("size") or "?"
                         pname = p.get("piece_name") or ""
-                        # piece 고유키 (size + piece_name 조합).
-                        piece_key = f"{size_lbl}__{pname}"
+                        # piece 고유키 (size + piece_name + piece_id/block_name/index).
+                        # 부위명 없는 케이스에도 unique 유지 (사장님 부위명 필요성 실증 2026-07-09).
+                        unique_id = p.get("piece_id") or p.get("block_name") or f"idx{j}"
+                        piece_key = f"{size_lbl}__{pname}__{unique_id}"
+                        exc_key = f"mat_exc__{style}__{tok}__{piece_key}"
                         # 현재 material (그룹 적용 후 값) 을 default 로.
                         cur = p.get("material_inferred") or group_choice
+                        # ── 카드: 썸네일(재질 색) + 사이즈 + bbox 치수 + selectbox ──
+                        # 테두리 색은 사용자가 방금 바꾼 선택(session_state) 즉시 반영 (rerun).
+                        cur_sel = st.session_state.get(exc_key, cur)
+                        _render_piece_thumbnail(p, cur_sel, size_px=150)
+                        wcm = p.get("width_cm") or 0.0
+                        hcm = p.get("height_cm") or 0.0
+                        st.caption(f"size **{size_lbl}** · {wcm:.1f} × {hcm:.1f} cm")
                         try:
                             idx_e = MATERIAL_OPTIONS.index(cur)
                         except ValueError:
                             idx_e = 0
                         ex_choice = st.selectbox(
-                            f"size {size_lbl}",
+                            f"재질 (size {size_lbl})",
                             MATERIAL_OPTIONS,
                             index=idx_e,
-                            key=f"mat_exc__{style}__{tok}__{piece_key}",
-                            help=pname,
+                            key=exc_key,
+                            help=pname or None,
+                            label_visibility="collapsed",
                         )
                         # 그룹값과 다르면 override (이미 그룹 단위에서 설정된 값을 piece 단위로 덮어씀).
                         if ex_choice != "미지정" and ex_choice != p.get("material_inferred"):
@@ -1477,11 +1580,57 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
     """
     st.markdown("#### 원단 폭")
 
+    # ── 단위 선택 (사장님 지시 2026-07-13) ────────────────────────
+    # 실무 대다수 인치 기재. 미국/일부 브랜드는 센치. 내부 계산은 항상 cm.
+    unit = st.radio(
+        "폭 단위",
+        options=["인치", "센치"],
+        index=0,  # 실무 대다수 인치 → default 인치
+        horizontal=True,
+        key="width_unit",
+        help="인치로 입력해도 내부 계산은 cm 로 변환됩니다 (× 2.54). 산출 로직 불변.",
+    )
+    is_inch = (unit == "인치")
+
+    # 결과 화면 카드에서 참조할 선택 단위 저장 (사장님 지시 2026-07-13):
+    #   카드는 병기 X → 사용자가 선택한 단위 하나로만 표기.
+    st.session_state["fabric_width_unit"] = "inch" if is_inch else "cm"
+
     # 선택된 사이즈에 등장하는 재질만 입력창 표시. 마카제외(NON)는 제외.
     relevant = [p for p in pieces if p["size"] in selected_sizes]
     detected = {p["material_inferred"] for p in relevant}
     detected.discard("마카제외")  # NON 은 마카에서 빠지므로 폭 입력 불필요
     order = ["주원단", "안감", "포켓팅", "배색", "논"]
+
+    def _width_input(col, mat: str, default_cm: float, key_base: str) -> float:
+        """단위 반영 number_input → 항상 cm(float) 반환. 두 단위 병기 표시.
+
+        default 는 각 모드의 bounds 로 clamp (정상 재질 값 불변, 0/범위밖 크래시 방어).
+        key 에 단위 suffix → 단위 전환 시 각 모드 자연스러운 default 로 새 위젯.
+        """
+        with col:
+            if is_inch:
+                default_in = round(default_cm / 2.54)
+                default_in = min(120.0, max(12.0, float(default_in)))
+                val_in = float(st.number_input(
+                    f"{mat} 폭 (inch)",
+                    min_value=12.0, max_value=120.0,
+                    value=default_in, step=0.5,
+                    key=f"{key_base}__in",
+                ))
+                cm = val_in * 2.54
+                st.caption(f"= **{cm:.1f} cm** ≈ {val_in:.1f} in")
+            else:
+                default_cm_c = min(300.0, max(30.0, float(int(default_cm))))
+                val_cm = float(st.number_input(
+                    f"{mat} 폭 (cm)",
+                    min_value=30.0, max_value=300.0,
+                    value=default_cm_c, step=1.0,
+                    key=f"{key_base}__cm",
+                ))
+                cm = val_cm
+                st.caption(f"= {cm:.0f} cm ≈ **{cm / 2.54:.1f} in**")
+            return cm
 
     widths: dict[str, float] = {}
     cols = st.columns(2)
@@ -1490,24 +1639,16 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
     for mat in order:
         if mat not in detected:
             continue
-        with cols[col_idx % 2]:
-            widths[mat] = float(st.number_input(
-                f"{mat} 폭 (cm)",
-                min_value=30, max_value=300,
-                value=int(DEFAULT_WIDTHS.get(mat, 150)),
-                step=1,
-                key=f"width_{mat}",
-            ))
+        widths[mat] = _width_input(
+            cols[col_idx % 2], mat, DEFAULT_WIDTHS.get(mat, 150), f"width_{mat}",
+        )
         col_idx += 1
 
     # 표준 외 원단 (예: 미분류 표기 등) — 그래도 DXF 에 등장하면 입력
     for mat in sorted(detected - set(order)):
-        with cols[col_idx % 2]:
-            widths[mat] = float(st.number_input(
-                f"{mat} 폭 (cm)",
-                min_value=30, max_value=300, value=150, step=1,
-                key=f"width_extra_{mat}",
-            ))
+        widths[mat] = _width_input(
+            cols[col_idx % 2], mat, 150, f"width_extra_{mat}",
+        )
         col_idx += 1
 
     # v3.3: accessory_fabrics 위젯 영구 제거. 함수(apply_accessory_overrides)는 보존.
@@ -1526,6 +1667,18 @@ def width_section(pieces: list[dict], selected_sizes: list[str]) -> dict[str, fl
             widths[mat] = w
 
     return widths
+
+
+def format_fabric_width(fabric_width_cm: float) -> str:
+    """원단 폭을 사용자가 선택한 단위(cm/inch) 하나로만 표기 (사장님 지시 2026-07-13).
+
+    session_state['fabric_width_unit'] = "inch" | "cm" (width_section 에서 저장).
+    병기 X — 선택 단위 하나만 노출. 미설정 시 cm default.
+    """
+    unit = st.session_state.get("fabric_width_unit", "cm")
+    if unit == "inch":
+        return f"{fabric_width_cm / 2.54:.0f} in"
+    return f"{fabric_width_cm:.0f} cm"
 
 
 def apply_accessory_overrides(pieces, accessories):
@@ -1642,8 +1795,66 @@ def nesting_section(available_sizes: list[str], hq_match: dict | None = None) ->
         marker_mode_label = direction
         base_size = only_size
 
-    # ── 그레이딩 모드 ──
+    # ── 그레이딩 감지 시: 산출 방식 선택 (단일/복수) ──
     else:
+        scope = st.radio(
+            "산출 방식",
+            options=["단일 사이즈", "복수 사이즈"],
+            index=0,  # 기본 단일 (사장님 실무 대다수 케이스)
+            horizontal=True,
+            help="단일: 사이즈 하나만 산출 · 복수: 여러 사이즈 조합 산출",
+            key="grading_scope",
+        )
+
+        # ── 그레이딩 감지 + 단일 사이즈 산출 ──
+        if scope == "단일 사이즈":
+            c_sz, c_gm, c_dir = st.columns([2, 1, 2])
+            with c_sz:
+                only_size = st.selectbox(
+                    "사이즈",
+                    options=available_sizes,
+                    index=available_sizes.index(default_base) if default_base in available_sizes else 0,
+                    key="grading_single_size",
+                )
+            with c_gm:
+                n_garments = st.number_input(
+                    "벌수",
+                    min_value=1, max_value=20, value=1, step=1,
+                    key="grading_single_n",
+                )
+            with c_dir:
+                direction = st.radio(
+                    "결방향",
+                    options=["1WAY", "2WAY"],
+                    index=1,
+                    horizontal=True,
+                    key="grading_single_dir",
+                )
+            n_garments = int(n_garments)
+            mirror = (direction == "2WAY")
+            if n_garments == 1:
+                size_ratio = None
+                total_garments = 1
+            else:
+                size_ratio = {only_size: n_garments}
+                total_garments = n_garments
+            summary_text = f"{only_size} {n_garments}벌 ({direction})"
+            config_id = f"grading_single_{only_size}_{n_garments}_{direction.lower()}"
+            marker_mode_label = direction
+            base_size = only_size
+
+            return {
+                "mirror": mirror,
+                "runtime_seconds": runtime,
+                "size_ratio": size_ratio,
+                "base_size": base_size,
+                "marker_mode_label": marker_mode_label,
+                "config_id": config_id,
+                "total_garments": total_garments,
+                "summary_text": summary_text,
+            }
+
+        # ── 그레이딩 감지 + 복수 사이즈 산출 ──
         st.caption("사이즈별로 벌수와 결방향을 입력하세요. 빈 사이즈는 마카에서 제외됩니다.")
 
         # 표 헤더
@@ -1850,8 +2061,7 @@ def nesting_results_section(
         st.metric("마카 길이", f"{marker_yd:.2f} yd",
                   f"{marker_m:.2f} m / {marker_cm:.1f} cm")
     with c3:
-        st.metric("원단 폭", f"{fabric_width_cm:.0f} cm",
-                  f"≈ {fabric_width_cm / 2.54:.1f} in")
+        st.metric("원단 폭", format_fabric_width(fabric_width_cm))
 
     # 메타 정보
     sizes_str = ", ".join(nest_result.get("sizes_included", []))
@@ -2239,7 +2449,7 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
 
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.metric("원단 폭", f"{row['fabric_width_cm']:.0f} cm")
+            st.metric("원단 폭", format_fabric_width(row['fabric_width_cm']))
 
         # multi-size 모드면 1벌당 요척 표시, 아니면 마카 길이 그대로
         is_multi = row.get("total_garments", 0) > 1
@@ -2332,7 +2542,15 @@ def material_results_section(nest_all: dict, pdf_context: dict | None = None,
             svg_height_px = int(fabric_width_cm * PX_PER_CM) + 80
             svg = re.sub(r'width="100%"', f'width="{svg_width_px}"', svg)
             svg = re.sub(r'height="100%"', f'height="{svg_height_px}"', svg)
-            st.components.v1.html(svg, width=container_width_px, height=container_height_px, scrolling=False)
+            # 좌측 정렬 통일 (사장님 지적 2026-07-13): 재질별 마카 원점을
+            #   컨테이너 좌측 상단에 고정. iframe body 기본 margin(8px) 리셋 +
+            #   래퍼 div 좌측 정렬로 세 재질 동일 위치 시작.
+            svg_html = (
+                "<style>html,body{margin:0;padding:0;}</style>"
+                "<div style=\"text-align:left;margin:0;padding:0;\">"
+                f"{svg}</div>"
+            )
+            st.components.v1.html(svg_html, width=container_width_px, height=container_height_px, scrolling=False)
         else:
             st.caption("(시각화 SVG 없음)")
 
@@ -3250,17 +3468,13 @@ def download_section(
 # ╔════════════════════════════════════════════════════════════╗
 # ║ 메인                                                       ║
 # ╚════════════════════════════════════════════════════════════╝
-def main() -> None:
-    # 상단 헤더 — 이모지 제거, 깔끔한 타이틀 + 서브타이틀
-    st.markdown("""
-    <div style="padding-top: 0.5rem; padding-bottom: 1rem;">
-        <h1 style="margin-bottom: 0.3rem;">원단 요척 산출 시스템</h1>
-        <p style="color: #64748b; margin: 0; font-size: 0.95rem;">
-            패턴 DXF 파일로 원단 소요량을 자동 계산합니다
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-    st.divider()
+def render_yochuk_tab() -> None:
+    """📏 요척 산출 탭 — 기존 메인 요척 산출 로직 (사장님 확정 2026-07-14 탭 분리).
+
+    로직 불변 — main() 헤더를 상위로 빼고 body 를 이 함수로 이동만 했음.
+    """
+    st.title("📏 요척 산출 시스템")
+    st.caption("패턴 DXF 파일로 원단 소요량을 자동 계산합니다")
 
     parsed = upload_section()
     if parsed is None:
@@ -3279,22 +3493,26 @@ def main() -> None:
     st.divider()
     selected_sizes = size_selection_section(parsed)
 
-    # 사장님 절대 원칙 (2026-05-01): DXF Material 코드 누락 시 사용자 수동 매핑 필수.
-    # parsed["pieces"][*]["material_inferred"] 가 이 안에서 직접 override 됨.
-    st.divider()
-    material_mapping_section(parsed)
-
-    st.divider()
-    widths = width_section(pieces_all, selected_sizes)
-
     # ── 본사 매칭 자동 감지 (메인 흐름에는 노출 X — 결과 화면 비교용으로만) ──
     style_code_auto = extract_style_code(parsed.get("file_name", "")) or parsed.get("style", "")
     hq_match = find_hq_match(style_code_auto) if style_code_auto else None
     # 일반 사용자는 본사 데이터 자체가 없음. 인포 박스 노출 안 함.
     # nesting_section 도 hq_match 기반 prefill 없음 (DXF 사이즈 그대로 default).
 
+    # ── 산출 방식(단일/복수 + 사이즈) 먼저 확정 (사장님 지시 2026-07-13) ──
+    # 재질 매핑 UI 를 산출 대상 사이즈로 필터하기 위해 nesting_section 을 앞에 배치.
     st.divider()
     opts = nesting_section(parsed.get("sizes", []))
+    target_sizes = _target_sizes_from_opts(opts)
+
+    # 사장님 절대 원칙 (2026-05-01): DXF Material 코드 누락 시 사용자 수동 매핑 필수.
+    # parsed["pieces"][*]["material_inferred"] 가 이 안에서 직접 override 됨.
+    # 산출 대상 사이즈 piece 만 UI 노출 (그룹 매핑은 전체 사이즈에 전파).
+    st.divider()
+    material_mapping_section(parsed, target_sizes)
+
+    st.divider()
+    widths = width_section(pieces_all, selected_sizes)
 
     st.divider()
 
@@ -3467,6 +3685,262 @@ def main() -> None:
         </p>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ╔════════════════════════════════════════════════════════════╗
+# ║ UI — 📐 PP vs 메인 패턴 면적 비교 탭 (사장님 원문 2026-07-09)  ║
+# ║ 협력사가 축율분이라 치고 메인 패턴을 뻥튀기하는지 검증.       ║
+# ║ 확정 사양 (2026-07-14): 경고 X, 계산 값만 표시 (사장님 판정). ║
+# ╚════════════════════════════════════════════════════════════╝
+def _axul_no_match_box(size_px: int = 120, text: str = "매칭 없음") -> str:
+    """축율 검증 썸네일 자리 — 매칭 없음/도형 없음 placeholder (회색 배경)."""
+    return (
+        f'<div style="width:{size_px}px;height:{size_px}px;display:flex;'
+        f'align-items:center;justify-content:center;background:#f3f4f6;'
+        f'border:1px dashed #ccc;border-radius:6px;color:#9ca3af;font-size:12px;">'
+        f'{text}</div>'
+    )
+
+
+def _axul_thumb_html(piece_ref: dict | None, size_px: int = 120) -> str:
+    """compare 결과의 slim piece 참조 → 재질별 테두리 썸네일 <img> HTML.
+
+    piece_ref 없음/좌표 부족 → placeholder. 120×120 고정 (사장님 확정 2026-07-15).
+    재질별 색은 MATERIAL_BORDER_COLOR 재사용 (material_border_color).
+    """
+    if not piece_ref:
+        return _axul_no_match_box(size_px)
+    coords = piece_ref.get("coords_cm") or []
+    if len(coords) < 3:
+        return _axul_no_match_box(size_px, text="도형 없음")
+    color = material_border_color(piece_ref.get("material_inferred"))
+    svg = render_piece_thumbnail_svg(
+        {"coords_cm": [list(c) for c in coords]},
+        size_px=size_px, border_color=color,
+    )
+    uri = svg_data_uri(svg)
+    if not uri:
+        return _axul_no_match_box(size_px, text="도형 없음")
+    return (
+        f'<img src="{uri}" width="{size_px}" height="{size_px}" '
+        f'style="display:block;border:1px solid #eee;border-radius:6px;" '
+        f'alt="조각 썸네일"/>'
+    )
+
+
+def _parse_uploaded_dxf(uploaded, label: str) -> dict | None:
+    """업로드 파일 → parse_dxf_v3. 실패 시 에러 표시 후 None."""
+    if uploaded is None:
+        return None
+    with st.spinner(f"{label} DXF 파싱 중..."):
+        parsed = parse_dxf_v3(uploaded.getvalue(), uploaded.name)
+    if parsed.get("error"):
+        st.error(f"❌ {label}: {parsed['error']}")
+        return None
+    if not parsed.get("pieces"):
+        st.warning(f"⚠️ {label}: 계산 가능한 피스가 없습니다.")
+        return None
+    parsed["file_name"] = uploaded.name
+    return parsed
+
+
+def render_pp_vs_main_tab() -> None:
+    """📐 축율 검증 UI (사장님 확정 사양 2026-07-15)."""
+    st.title("📐 축율 검증")
+    st.caption(
+        "메인 그레이딩 패턴 기준 사이즈와 PP 패턴 면적을 비교 검증합니다.  \n"
+        "협력사 제출 축율 정보(원단 가로·세로 축율)와 비교해 허용 범위를 확인합니다."
+    )
+
+    # ── 업로드 2열 ──────────────────────────────────────────────
+    col_pp, col_main = st.columns(2)
+    with col_pp:
+        st.markdown("#### PP 패턴")
+        pp_file = st.file_uploader("PP 패턴 DXF", type=["dxf"], key="pp_vs_main__pp")
+    with col_main:
+        st.markdown("#### 메인 그레이딩 패턴")
+        main_file = st.file_uploader("메인 패턴 DXF", type=["dxf"], key="pp_vs_main__main")
+
+    if pp_file is None or main_file is None:
+        st.info("👆 PP 패턴과 메인 패턴 두 파일을 모두 업로드하면 비교가 시작됩니다.")
+        return
+
+    pp_parsed = _parse_uploaded_dxf(pp_file, "PP 패턴")
+    main_parsed = _parse_uploaded_dxf(main_file, "메인 패턴")
+    if pp_parsed is None or main_parsed is None:
+        return
+
+    # ── 공통 사이즈 감지 ────────────────────────────────────────
+    pp_sizes = set(pp_parsed.get("sizes") or [])
+    main_sizes = set(main_parsed.get("sizes") or [])
+    common_sizes = sorted(pp_sizes & main_sizes)
+    if not common_sizes:
+        st.error(
+            f"❌ 두 파일에 공통 사이즈가 없습니다. "
+            f"PP: {sorted(pp_sizes) or '-'} / 메인: {sorted(main_sizes) or '-'}"
+        )
+        return
+
+    # default = 가장 흔한 사이즈 (양쪽 piece 수 합 최대).
+    def _size_count(size: str) -> int:
+        n_pp = sum(1 for p in pp_parsed["pieces"] if p.get("size") == size)
+        n_main = sum(1 for p in main_parsed["pieces"] if p.get("size") == size)
+        return n_pp + n_main
+
+    default_size = max(common_sizes, key=_size_count)
+    st.markdown("#### 기준 사이즈")
+    target_size = st.selectbox(
+        "비교할 기준 사이즈 (두 파일 공통)",
+        options=common_sizes,
+        index=common_sizes.index(default_size),
+        key="pp_vs_main__size",
+        help="양쪽 파일에 공통으로 존재하는 사이즈. default 는 조각이 가장 많은 사이즈.",
+    )
+
+    # ── 계산 ────────────────────────────────────────────────────
+    result = compare_pp_vs_main(
+        pp_parsed["pieces"], main_parsed["pieces"], target_size,
+    )
+
+    # ── 결과 카드 3개 ───────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("PP 총면적", f"{result['pp_total_area_cm2']:,.1f} cm²")
+    with c2:
+        st.metric("메인 총면적", f"{result['main_total_area_cm2']:,.1f} cm²")
+    with c3:
+        exp = result["total_expansion_pct"]
+        if exp is None:
+            st.metric("확대율", "계산 불가")
+        else:
+            st.metric("확대율", f"{exp:+.2f} %",
+                      f"기준 사이즈 {target_size} · (메인−PP)/PP")
+
+    # ── 조각별 상세 (default 접힘) ──────────────────────────────
+    # 사장님 지시 2026-07-15: PP/메인 조각 썸네일 나란히 → 크기 순 오매칭 시각 판별.
+    # st.dataframe 은 이미지 미지원 → st.columns 행 반복으로 렌더.
+    with st.expander("조각별 상세 (썸네일 + 매칭 방식)", expanded=False):
+        THUMB_PX = 120
+        COL_RATIO = [1.4, 1.7, 1.0, 1.4, 1.0, 0.9, 1.2]
+
+        def _method_disp(m: dict) -> str:
+            """매칭 근거 라벨 (사장님 원칙 #2 — 근거 없는 결과 표시 금지).
+
+            낮은 유사도(SHAPE_LOW_SIM_CEIL 미만)는 연한 노란 배경 강조.
+            """
+            if m["match_method"] == "block_name":
+                return "🔤 이름 매칭"
+            if m["match_method"] == "shape":
+                sim = m.get("similarity_score")
+                if sim is None:
+                    return "🔷 도형 매칭"
+                txt = f"🔷 도형 매칭 ({sim * 100:.0f}%)"
+                if sim < SHAPE_LOW_SIM_CEIL:
+                    return (f'<span style="background:#fef9c3;padding:2px 6px;'
+                            f'border-radius:4px;">⚠️ {txt}</span>')
+                return txt
+            return m["match_method"]
+
+        has_any = bool(result["matched_pairs"] or result["unmatched_pp"]
+                       or result["unmatched_main"])
+        if not has_any:
+            st.caption("(비교할 조각이 없습니다)")
+        else:
+            # 헤더
+            hc = st.columns(COL_RATIO)
+            for col, txt in zip(hc, ["PP", "블록 이름", "PP 면적", "메인",
+                                     "메인 면적", "확대율", "매칭 방식"]):
+                col.markdown(f"**{txt}**")
+
+            def _exp_disp(v):
+                return f"{v:+.2f} %" if v is not None else "계산 불가"
+
+            # 매칭된 쌍
+            for m in result["matched_pairs"]:
+                block_disp = (
+                    m["block_name_pp"]
+                    if m["block_name_pp"] == m["block_name_main"]
+                    else f'{m["block_name_pp"] or "(무명)"} ↔ {m["block_name_main"] or "(무명)"}'
+                )
+                rc = st.columns(COL_RATIO)
+                rc[0].markdown(_axul_thumb_html(m.get("pp_piece"), THUMB_PX),
+                               unsafe_allow_html=True)
+                rc[1].markdown(block_disp or "(무명)")
+                rc[2].markdown(f"{m['pp_area']:,.1f} cm²")
+                rc[3].markdown(_axul_thumb_html(m.get("main_piece"), THUMB_PX),
+                               unsafe_allow_html=True)
+                rc[4].markdown(f"{m['main_area']:,.1f} cm²")
+                rc[5].markdown(_exp_disp(m["expansion_pct"]))
+                rc[6].markdown(_method_disp(m), unsafe_allow_html=True)
+
+            # PP 만 있음 (메인 매칭 없음)
+            for u in result["unmatched_pp"]:
+                rc = st.columns(COL_RATIO)
+                rc[0].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
+                               unsafe_allow_html=True)
+                rc[1].markdown((u["block_name"] or "(무명)") + " (PP만)")
+                rc[2].markdown(f"{u['area']:,.1f} cm²")
+                rc[3].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
+                rc[4].markdown("—")
+                rc[5].markdown("—")
+                rc[6].markdown("❌ 매칭 없음")
+
+            # 메인 만 있음 (PP 매칭 없음)
+            for u in result["unmatched_main"]:
+                rc = st.columns(COL_RATIO)
+                rc[0].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
+                rc[1].markdown((u["block_name"] or "(무명)") + " (메인만)")
+                rc[2].markdown("—")
+                rc[3].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
+                               unsafe_allow_html=True)
+                rc[4].markdown(f"{u['area']:,.1f} cm²")
+                rc[5].markdown("—")
+                rc[6].markdown("❌ 매칭 없음")
+
+        # 총계 행 (합계 + 평균 확대율).
+        exp_vals = [m["expansion_pct"] for m in result["matched_pairs"]
+                    if m["expansion_pct"] is not None]
+        avg_exp = (sum(exp_vals) / len(exp_vals)) if exp_vals else None
+        total_exp = result["total_expansion_pct"]
+        st.markdown(
+            f"**총계** — PP {result['pp_total_area_cm2']:,.1f} cm² · "
+            f"메인 {result['main_total_area_cm2']:,.1f} cm² · "
+            f"총면적 확대율 {('%.2f%%' % total_exp) if total_exp is not None else '계산 불가'} · "
+            f"조각 평균 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
+            f"(매칭 {len(result['matched_pairs'])}쌍)"
+        )
+
+    # ── 협력사 신고 축율 대조 (선택) ────────────────────────────
+    st.markdown("#### 협력사 신고 축율 대조 (선택)")
+    st.caption("협력사가 신고한 축율과 시스템 계산 확대율을 나란히 표시합니다 (경고 없음 · 사장님 판정).")
+    col_v, col_h = st.columns(2)
+    with col_v:
+        declared_v = st.number_input("협력사 신고 세로 축율 (%)", value=0.0, step=0.1,
+                                     key="pp_vs_main__declared_v", format="%.2f")
+    with col_h:
+        declared_h = st.number_input("협력사 신고 가로 축율 (%)", value=0.0, step=0.1,
+                                     key="pp_vs_main__declared_h", format="%.2f")
+
+    if declared_v != 0.0 or declared_h != 0.0:
+        exp = result["total_expansion_pct"]
+        sys_disp = f"{exp:+.2f} %" if exp is not None else "계산 불가"
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            st.metric("신고 세로 축율", f"{declared_v:+.2f} %")
+        with d2:
+            st.metric("신고 가로 축율", f"{declared_h:+.2f} %")
+        with d3:
+            st.metric("시스템 계산 면적 확대율", sys_disp)
+
+
+def main() -> None:
+    # 사장님 지시 2026-07-15: 최상단 헤더 제거 → st.tabs 가 페이지 최상단.
+    # 각 탭 안에 기능별 제목 (render_yochuk_tab / render_pp_vs_main_tab).
+    tab_yochuk, tab_pp_main = st.tabs(["📏 요척 산출 시스템", "📐 축율 검증"])
+    with tab_yochuk:
+        render_yochuk_tab()
+    with tab_pp_main:
+        render_pp_vs_main_tab()
 
 
 if __name__ == "__main__":

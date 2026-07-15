@@ -93,21 +93,21 @@ def _align_pieces_to_grain(
     pieces: list[dict],
     polygons: dict | None = None,
 ) -> tuple[list[dict], dict]:
-    """Phase 2 식서 사전 회전 (사장님 결정 2026-05-05, 본질 정정 2026-05-08).
+    """Phase 2 식서 사전 회전 (사장님 결정 2026-05-05, angle 기반 재설계 2026-07-13).
 
-    각 piece 의 grain.kind 에 따라 polygon 을 회전해 식서를 X축(마카 가로)으로 통일.
+    각 piece 의 결방향 선 실측 각도(grain.angle_deg)만큼 polygon 을 회전해
+    식서를 X축(마카 가로)으로 정렬. get_alignment_rotation = grain_rotation_deg(angle) = -angle.
     sparrow strip 좌표계: X축 = 마카 길이 (무한 성장), Y축 = 원단 폭.
-    → 식서 = 원단 길이방향 = 마카 가로 = sparrow X축 (사장님 본질).
+    → 식서 = 원단 길이방향 = 마카 가로 = sparrow X축 (사장님 본질 2026-05-08).
 
-    회전:
-      STRAIGHT_GRAIN_X → 0°   (이미 식서 가로 = 정상)
-      STRAIGHT_GRAIN_Y → 90°  (식서 Y → X 통일)
-      BIAS / UNKNOWN / NONSTANDARD → 0°  (caller 가 추가 처리)
+    회전각 = -angle_deg (임의 각도 지원):
+      angle 0°    → 0°      (이미 식서 가로 = 정상, 회전 안 함)
+      angle 90°   → -90°    (세로 식서 → X 통일)
+      angle 107.5°→ -107.5° (사장님 CAD 케이스 — 이전 NONSTANDARD 오분류 정정)
+      angle 45°   → -45°    (바이어스도 결방향 선을 X 에 정렬)
 
+    스냅/분류(X/Y/BIAS/NONSTANDARD) 폐기 — CAD 는 오차 없음 (사장님 확정 2026-07-13).
     Returns: (회전된 pieces, 회전된 polygons)
-
-    근거: "식서 = 원단 길이방향 = 마카 가로" — 사장님 본질 (2026-05-08).
-    이전 (X→Y 회전) 은 sparrow strip 좌표계와 정반대. 본사 컨벤션 정정.
     """
     out_pieces: list[dict] = []
     out_polygons: dict = dict(polygons) if polygons else {}
@@ -808,26 +808,17 @@ _SVG_LABEL_RE = re.compile(
 
 
 def humanize_svg_labels(svg_content: str) -> str:
-    """sparrow SVG 의 영문 라벨을 한글 + 의류 단위(yd) 로 치환.
+    """sparrow SVG 의 영문 헤더 라벨("h|w|d|final_...")을 제거.
 
-    h(strip_height) = 원단 폭, w(strip_width) = 마카 길이, d = 효율.
-    final_<name> 부분 제거.
+    헤더 3정보(원단 폭 / 마카 길이 / 효율)는 결과 화면 카드(c1/c2/c3)에
+    이미 표시됨 → SVG 상단 중복 헤더 삭제 (사장님 지적 2026-07-13, 이슈 3).
+    piece 라벨은 이 regex 대상 아님 → 영향 없음.
     """
     if not svg_content:
         return svg_content
 
-    def _replace(m: re.Match) -> str:
-        h = float(m.group(1))
-        w = float(m.group(2))
-        d = float(m.group(3))
-        w_yd = w * CM_TO_YD
-        return (
-            f"원단 폭: {h:.1f} cm   |   "
-            f"마카 길이: {w:.1f} cm ({w_yd:.2f} yd)   |   "
-            f"효율: {d:.1f}%"
-        )
-
-    return _SVG_LABEL_RE.sub(_replace, svg_content)
+    # 헤더 텍스트 내용만 빈 문자열로 치환 (<text> 태그는 유지, 시각적으로 사라짐).
+    return _SVG_LABEL_RE.sub("", svg_content)
 
 
 # ╔════════════════════════════════════════════════════════════╗
@@ -1055,9 +1046,11 @@ def add_axis_labels_to_svg(
 
     vb_x, vb_y, vb_w, vb_h = map(float, m.groups())
 
-    # 폰트 크기 — viewBox 비율 기반 (마카 길이의 3% 정도가 적당).
-    fs = max(2.5, marker_length_cm * 0.025)
-    pad = fs * 1.6  # 라벨 영역 padding
+    # 사장님 지적 (2026-07-13): 폰트 크기 원단폭·마카길이 무관 고정.
+    # viewBox 단위 5.5 cm ≈ 화면 12 px (PX_PER_CM=2.187 기준). 조정 시 이 상수만 변경.
+    FONT_SIZE_VIEWBOX_CM = 5.5
+    fs = FONT_SIZE_VIEWBOX_CM
+    pad = fs * 1.6  # 라벨 영역 padding (fs 기반 유지)
 
     # 새 viewBox 본질 (사장님 raw 적발 2026-05-11):
     # sparrow native transform 의 회전 anchor 본질 적용 후 진짜 piece bbox 계산.
@@ -1177,9 +1170,11 @@ def shrink_piece_labels(svg_content: str, marker_length_cm: float) -> str:
     if not svg_content:
         return svg_content
 
-    # 권장 폰트 크기 (cm 단위, viewBox 좌표계) — 마카 길이 1.0% (8~10pt 환산)
-    # 마카 100cm → 1.0cm 폰트, 200cm → 2.0cm. 너무 작으면 안 보이고 너무 크면 마카 가림.
-    target_fs = max(0.8, marker_length_cm * 0.010)
+    # 사장님 지적 (2026-07-13): piece 라벨도 마카 길이 무관 고정.
+    # 조각 안이라 축 라벨(5.5)보다 작게. viewBox 3.0 cm ≈ 화면 6.5 px.
+    # 조정 시 이 상수만 변경. (marker_length_cm 인자는 하위호환 위해 유지, 미사용)
+    PIECE_LABEL_FONT_VIEWBOX_CM = 3.0
+    target_fs = PIECE_LABEL_FONT_VIEWBOX_CM
 
     # sparrow 가 생성한 piece 라벨 <text font-size="..."> 패턴 일괄 축소.
     # 화살표/축 라벨(grain_arrows, axis_labels) g 그룹은 별도 font-size 명시 — 영향 X.
@@ -1269,12 +1264,14 @@ def annotate_marker_svg(
     if placements:
         svg_content = add_grain_arrows_to_svg(svg_content, placements)
     if fabric_width_cm is not None and marker_length_cm is not None:
+        # 순서 확정 (사장님 폰트 고정 2026-07-13): piece 라벨 고정 축소를 먼저.
+        # shrink_piece_labels 는 전역 font-size 치환이라, 축 라벨(고정 5.5)을 뒤에 넣어야
+        # 덮이지 않음 (축 5.5 > piece 3.0, 둘 다 마카길이 무관 고정).
+        svg_content = shrink_piece_labels(svg_content, marker_length_cm)
         svg_content = add_axis_labels_to_svg(
             svg_content, fabric_width_cm, marker_length_cm,
             placements=placements,
         )
-        # piece 라벨 축소 (마카 길이 기반)
-        svg_content = shrink_piece_labels(svg_content, marker_length_cm)
     # 컨테이너 fit + aspect ratio 보존 (가로 스크롤 X — 사장님 본질 2026-05-06)
     svg_content = fit_svg_to_container(svg_content)
     return svg_content
@@ -1436,16 +1433,31 @@ def nest_by_material(
 
         marker_cm = res.get("marker_length_cm", 0.0)
         n_mirror = sum(1 for v in res.get("mirror_count_per_piece", {}).values() if v == 1)
+        # 마카 갯수 본질 — placements 기반 (사장님 본질 2026-05-10).
+        # 단일 경로도 multisize 와 동일 스키마 유지 (회귀 버그 2026-07-13: 필드 누락 → UI "마카 갯수 0").
+        # 단일 경로 res 는 total_garments 미보유 → raw 진실값 n_lay(사용자 입력 벌수) 로 fallback.
+        placements_total = len(res.get("placements", []))
+        tg_calc = res.get("total_garments", n_lay) or 1
+        placements_per_garment = (
+            placements_total // tg_calc if tg_calc > 0 else placements_total
+        )
         summary_rows.append({
             "material": mat,
             "fabric_width_cm": width,
             "marker_length_cm": marker_cm,
             "marker_length_yd": marker_cm * CM_TO_YD,
-            "pieces_count": len(mat_pieces),
+            "pieces_count": len(mat_pieces),  # 1벌당 unique 패턴
             "mirror_count": n_mirror,
+            # 마카 실제 깔린 piece 수 (본사 "패턴수" 와 fair 비교 단위).
+            "placements_total": placements_total,
+            "placements_per_garment": placements_per_garment,
             "efficiency_pct": res.get("efficiency", 0.0) * 100,
             "runtime_actual_sec": res.get("runtime_actual_sec", 0.0),
             "has_error": bool(res.get("error")),
+            # multisize 와 동일 스키마 유지 (단일 경로: total_garments=n_lay).
+            "total_garments": res.get("total_garments", n_lay),
+            "yards_per_garment": res.get("yards_per_garment", 0.0),
+            "cm_per_garment": res.get("cm_per_garment", 0.0),
         })
 
     return {

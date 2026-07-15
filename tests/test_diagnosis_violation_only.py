@@ -7,10 +7,10 @@ test_diagnosis_violation_only.py
 검증:
   1. build_raw_table — raw 정보 표 (항상)
   2. detect_violations — 위반 시만:
-     · pattern_name_invalid (표준 외)
      · quantity_missing
      · material_missing
      · grain_missing (estimated)
+     · pattern_name_invalid 폐기 (사장님 확정 2026-07-14 — 부위명 필수 아님)
   3. Material:NON → 위반 X (정보성)
   4. 정상 piece → 위반 0
 """
@@ -73,11 +73,17 @@ class TestViolations(unittest.TestCase):
         v = detect_violations(parsed)
         self.assertEqual(v, [])
 
-    def test_pattern_name_invalid(self):
+    def test_pattern_name_invalid_deprecated(self):
+        """부위명 위반(pattern_name_invalid) 폐기 (사장님 확정 2026-07-14).
+
+        표준 외 부위명이어도 더 이상 위반으로 잡지 않음 — 다른 위반(수량/원단/식서)
+        이 없는 clean piece 면 위반 0.
+        """
         parsed = {"pieces": [_piece(piece_name="BODICE", is_standard=False)]}
         v = detect_violations(parsed)
         types = [x["type"] for x in v]
-        self.assertIn("pattern_name_invalid", types)
+        self.assertNotIn("pattern_name_invalid", types)
+        self.assertEqual(v, [])
 
     def test_quantity_missing(self):
         parsed = {"pieces": [_piece(quantity=None)]}
@@ -106,14 +112,14 @@ class TestViolations(unittest.TestCase):
         self.assertNotIn("material_missing", types)
 
     def test_multiple_violations_same_piece(self):
-        """한 piece 에 여러 위반 가능"""
+        """한 piece 에 여러 위반 가능 (부위명 위반은 폐기 — 수량/원단만)."""
         parsed = {"pieces": [_piece(
             piece_name="BAD_NAME", is_standard=False,
             quantity=None, material="",
         )]}
         v = detect_violations(parsed)
         types = [x["type"] for x in v]
-        self.assertIn("pattern_name_invalid", types)
+        self.assertNotIn("pattern_name_invalid", types)
         self.assertIn("quantity_missing", types)
         self.assertIn("material_missing", types)
 

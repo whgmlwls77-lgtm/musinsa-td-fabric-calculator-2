@@ -57,9 +57,13 @@ class TestDetectScaleBox(unittest.TestCase):
         self.assertTrue(box["is_square"])
 
     def test_square_only_no_name(self):
-        """정사각형 + NON 만 있어도 검출."""
+        """정사각형(cm 50 표준값) + NON 만 있어도 검출 (이름 키워드 무).
+
+        이름 "GRADE_REF" 는 SCALE_BOX_NAME_KEYWORDS 미포함 → 크기(cm 50)+NON 경로 검출.
+        (기존 "MARKER_BOX" 는 신규 "BOX" 키워드에 매칭되므로 키워드 없는 이름으로 교체.)
+        """
         pieces = [
-            _piece("P1", "MARKER_BOX", 50.0, 50.0, mat_raw="NON", mat_inferred="마카제외"),
+            _piece("P1", "GRADE_REF", 50.0, 50.0, mat_raw="NON", mat_inferred="마카제외"),
         ]
         box = detect_scale_box(pieces)
         self.assertIsNotNone(box)

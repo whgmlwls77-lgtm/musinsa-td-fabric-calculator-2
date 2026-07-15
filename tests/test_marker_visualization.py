@@ -40,23 +40,22 @@ SAMPLE_SVG = (
 
 class TestShrinkPieceLabels(unittest.TestCase):
 
-    def test_short_marker_min_font(self):
-        """마카 짧으면 최소 폰트 (0.8) 적용"""
+    def test_fixed_font_short_marker(self):
+        """마카 짧아도 고정 3.0 (사장님 폰트 고정 2026-07-13 — 비례 폐기)."""
         out = shrink_piece_labels(SAMPLE_SVG, marker_length_cm=50.0)
-        # 0.010 × 50 = 0.5 → max(0.8, 0.5) = 0.8
-        self.assertIn('font-size="0.80"', out)
+        self.assertIn('font-size="3.00"', out)
 
-    def test_long_marker_proportional_font(self):
-        """마카 200cm → 2.00 폰트"""
+    def test_fixed_font_long_marker(self):
+        """마카 길어도 동일 고정 3.0 (이전 marker×0.010 비례 폐기)."""
         out = shrink_piece_labels(SAMPLE_SVG, marker_length_cm=200.0)
-        self.assertIn('font-size="2.00"', out)
+        self.assertIn('font-size="3.00"', out)
+        self.assertNotIn('font-size="2.00"', out)  # 옛 비례값 재발 방지
 
-    def test_all_text_font_sizes_shrunk(self):
-        """모든 <text> 의 font-size 통일"""
+    def test_all_text_font_sizes_uniform_fixed(self):
+        """모든 <text> 의 font-size 고정 통일 (3.0)"""
         out = shrink_piece_labels(SAMPLE_SVG, marker_length_cm=100.0)
-        # 모든 font-size 동일 (1.00)
         sizes = set(re.findall(r'font-size="([\d.]+)"', out))
-        self.assertEqual(sizes, {"1.00"})
+        self.assertEqual(sizes, {"3.00"})
 
     def test_empty_svg(self):
         self.assertEqual(shrink_piece_labels("", 100.0), "")
@@ -204,8 +203,10 @@ class TestAnnotateMarkerIntegration(unittest.TestCase):
         self.assertIn('id="grain_arrows"', out)
         # 축 라벨
         self.assertIn("원단 길이방향", out)
-        # piece 라벨 폰트 축소
-        self.assertIn('font-size="2.00"', out)
+        # 폰트 고정 (마카길이 무관): piece 3.0 + 축 5.5 (사장님 폰트 고정 2026-07-13)
+        self.assertIn('font-size="3.00"', out)
+        self.assertIn('font-size="5.50"', out)
+        self.assertNotIn('font-size="2.00"', out)  # 옛 비례값(marker200×0.010) 폐기
         # aspect ratio 보존 — fit_svg_to_container 가 마지막에 xMidYMid meet 적용
         # (사장님 이슈 B 본질 2026-05-07: 잘림 방지 중앙 정렬)
         self.assertIn('preserveAspectRatio="xMidYMid meet"', out)

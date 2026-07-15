@@ -1,5 +1,8 @@
 """
-DXF 진단 — 4대 카테고리 (결방향 / 원단 / 패널 / 수량) 자동 진단 + 협력사 메시지.
+DXF 진단 — 카테고리 (결방향 / 원단 / 텍스트 인코딩 / 수량 / 스케일) 자동 진단 + 협력사 메시지.
+
+부위명(패널) 카테고리는 사장님 확정 결정(2026-07-14)으로 폐기 — PIECE NAME 필수 아님.
+대신 텍스트 인코딩(영문/숫자만) 카테고리 신설 (비ASCII 표기 = 인코딩 오류 위험).
 
 사장님 절대 원칙: 알고리즘 읽기 실패 vs 협력사 정보 누락 구분.
 이 모듈은 그 구분을 raw 데이터로 입증한다 — 추측 금지.
@@ -11,8 +14,6 @@ DXF 진단 — 4대 카테고리 (결방향 / 원단 / 패널 / 수량) 자동 �
 from __future__ import annotations
 
 import re
-
-from piece_name_normalize import normalize_piece_name
 
 # 진단 결과 상태값.
 OK = "OK"
@@ -194,119 +195,75 @@ def diagnose_material(parsed: dict) -> dict:
 
 
 # ──────────────────────────────────────────────
-# [3] 패널 정보 (piece_name)
-# 사장님 본질 (2026-05-06): "표준만 인식 → 표준 외 위반 알림"
-#   panel_mapping.json 의 standard_names + 약자 매칭 = 표준
-#   미매칭 = 표준 외 (위반)
-#   Material:NON 마카제외 piece 는 패널 분류 대상에서 제외.
+# [3] 텍스트 인코딩 (영문/숫자만 — 비ASCII 감지)
+# 사장님 확정 결정 (2026-07-14): PIECE NAME 부위명 카테고리화 폐기.
+#   "국제표준어 영어로만 쓰면 크게 문제 없음. 중국어 등으로 쓰면 오류 날 수 있음."
+#   → 영문/숫자만 사용해야 인코딩 오류(CP949/EUC-KR 등) 방지 가능.
+#   → 한글/중국어/일본어 등 비ASCII 문자 감지 시 위반 알림.
+#   본질 #6 "정상은 침묵, 위반만 알림" 준수.
 # ──────────────────────────────────────────────
-def diagnose_panel(parsed: dict) -> dict:
-    pieces = parsed["pieces"]
+def diagnose_text_encoding(parsed: dict) -> dict:
+    """각 조각의 텍스트 필드에 비ASCII 문자(한글/중국어/일본어 등) 감지.
+
+    사장님 확정 원리 (2026-07-14):
+      영문/숫자만 사용해야 인코딩 오류(CP949/EUC-KR 등) 방지 가능.
+      비ASCII 문자(ord > 127) 감지 시 위반.
+    """
+    pieces = parsed.get("pieces") or []
     if not pieces:
-        return _empty("패널 정보")
+        return _empty("텍스트 인코딩")
 
-    style = (parsed.get("style") or "").upper()
-    seen_keys: set[str] = set()
-    by_class: dict[str, int] = {"standard": 0, "non_standard": 0, "empty": 0}
-    samples: dict[str, list[str]] = {k: [] for k in by_class}
-    n_excluded = 0
-
+    violations: list[dict] = []
     for p in pieces:
-        pk = p.get("piece_key") or p.get("piece_id") or ""
-        if pk in seen_keys:
-            continue
-        seen_keys.add(pk)
+        for field in ("material_raw", "piece_name", "size"):
+            val = p.get(field)
+            val = val if isinstance(val, str) else ("" if val is None else str(val))
+            non_ascii = [c for c in val if ord(c) > 127]
+            if non_ascii:
+                violations.append({
+                    "piece_id": p.get("piece_id"),
+                    "field": field,
+                    "value": val,
+                    "non_ascii": non_ascii[:5],  # 처음 5글자만
+                })
+        # annotations 리스트도 검사
+        for anno in (p.get("annotations") or []):
+            anno = anno if isinstance(anno, str) else str(anno)
+            non_ascii = [c for c in anno if ord(c) > 127]
+            if non_ascii:
+                violations.append({
+                    "piece_id": p.get("piece_id"),
+                    "field": "annotation",
+                    "value": anno,
+                    "non_ascii": non_ascii[:5],
+                })
 
-        # 마카제외 (Material=NON) → 패널 표준 분류 대상 외.
-        raw_mat = (p.get("material_raw") or p.get("material") or "").strip().upper()
-        inferred_mat = (p.get("material_inferred") or "").strip()
-        if inferred_mat == "마카제외" or raw_mat in {"NON", "NONE"}:
-            n_excluded += 1
-            continue
+    n_total = len(pieces)
+    if not violations:
+        return {
+            "status": OK,
+            "summary": f"모든 텍스트 영문/숫자 표기 ({n_total} piece) — 인코딩 오류 위험 없음.",
+            "dxf_state": f"비ASCII 문자 0건 / {n_total} piece",
+            "algo_state": "영문/숫자 표기 — CP949/EUC-KR 인코딩 안전",
+            "raw": {"total": n_total, "violation_count": 0, "violations": []},
+        }
 
-        nm = (p.get("piece_name") or "").strip()
-        # 스타일 prefix 제거 (예: 'MMAPS003 FRONT_BODY' → 'FRONT_BODY')
-        if style and nm.upper().startswith(style):
-            nm = nm[len(style):].lstrip(" -_")
-
-        if not nm:
-            cls = "empty"
-            disp = "(empty)"
-        else:
-            std_name, is_standard = normalize_piece_name(nm)
-            if is_standard:
-                cls = "standard"
-                disp = std_name if std_name == nm.upper() else f"{nm} → {std_name}"
-            else:
-                cls = "non_standard"
-                disp = nm
-
-        by_class[cls] += 1
-        if len(samples[cls]) < 5:
-            samples[cls].append(disp)
-
-    n_total = len(seen_keys)
-    n_classified = sum(by_class.values())
-    n_std = by_class["standard"]
-    n_non = by_class["non_standard"]
-    n_empty = by_class["empty"]
-
-    # 마카제외만 있고 분류 대상 0개 → 정상 (마카 nesting skip).
-    if n_classified == 0:
-        if n_excluded > 0:
-            return {
-                "status": OK,
-                "summary": f"마카제외 piece 만 {n_excluded}/{n_total} (전부 nesting skip).",
-                "dxf_state": f"unique 부위 {n_total}개 (전부 마카제외)",
-                "algo_state": "마카 nesting skip",
-                "raw": {
-                    "n_unique_pieces": n_total,
-                    "by_class": by_class,
-                    "samples": samples,
-                    "n_excluded": n_excluded,
-                },
-            }
-        return _empty("패널 정보")
-
-    excluded_disp = f" + 마카제외 {n_excluded}개" if n_excluded > 0 else ""
-
-    if n_std == n_classified:
-        status = OK
-        summary = f"모든 piece 표준 부위명 ({n_std}/{n_classified}){excluded_disp}."
-    elif n_empty > 0 and n_non == 0:
-        status = FAIL
-        summary = f"이름 누락 piece {n_empty}/{n_classified}{excluded_disp}."
-    elif n_non > 0:
-        status = WARN
-        summary = (
-            f"표준 외 명칭 {n_non}/{n_classified}개{excluded_disp} — "
-            f"panel_mapping.json 표준 어휘집 등재 또는 영문 표준 부위명 사용 요청 필요."
-        )
-    else:
-        status = WARN
-        summary = f"혼재 — 표준:{n_std} 표준외:{n_non} 누락:{n_empty}{excluded_disp}"
-
-    # 샘플 표시.
-    sample_disp_parts = []
-    for cls, label in [("standard", "표준"), ("non_standard", "표준외"), ("empty", "누락")]:
-        if samples[cls]:
-            sample_disp_parts.append(f"{label}: " + ", ".join(samples[cls]))
-    sample_disp = " · ".join(sample_disp_parts)
-
+    n_pieces_affected = len({v["piece_id"] for v in violations})
+    sample_disp = " · ".join(
+        f'{v["field"]}="{v["value"]}"' for v in violations[:5]
+    )
     return {
-        "status": status,
-        "summary": summary,
-        "dxf_state": f"unique 부위 {n_total}개 (마카 분류 {n_classified}, 마카제외 {n_excluded}) — {sample_disp}",
-        "algo_state": (
-            "표준 외/누락 → 매핑 사전 또는 영문 표준 표기 요청"
-            if (n_non > 0 or n_empty > 0)
-            else "표준 표기 그대로 사용"
+        "status": WARN,
+        "summary": (
+            f"{n_pieces_affected}개 조각에서 한글/중국어 등 비ASCII 문자 감지됨 "
+            f"({len(violations)}건) → 협력사에 영문/숫자로 재저장 요청 필요."
         ),
+        "dxf_state": f"비ASCII 감지: {sample_disp}",
+        "algo_state": "영문/숫자만 표기 요청 — 한글/중국어/일본어 표기는 CP949/EUC-KR 깨짐 유발",
         "raw": {
-            "n_unique_pieces": n_total,
-            "by_class": by_class,
-            "samples": samples,
-            "n_excluded": n_excluded,
+            "total": n_total,
+            "violation_count": len(violations),
+            "violations": violations,
         },
     }
 
@@ -343,7 +300,7 @@ def diagnose_quantity(parsed: dict) -> dict:
     if n == 0:
         return _empty("수량/대칭")
 
-    # unique piece 단위 집계 — diagnose_panel 과 일관.
+    # unique piece 단위 집계 (piece_key/piece_id 기준 중복 제거).
     seen_keys: set[str] = set()
     n_unique = 0
     n_excluded = 0
@@ -467,56 +424,115 @@ def diagnose_quantity(parsed: dict) -> dict:
 #
 # 사장님 명시 (2026-05-07 정정): 협력사 혼선 방지 — 모든 표기 "50cm × 50cm".
 # ──────────────────────────────────────────────
-SCALE_BOX_NAME_KEYWORDS = ("SCALE_BOX", "50CM_X_50CM", "50CMX50CM", "50CM",
-                          "50X50", "50_X_50", "비율박스", "비율_박스")
+# 실무에서 실제 사용되는 다양한 표기 (사장님 실증 2026-07-14: "50x50_32").
+# 대소문자 무시 + 사이즈 접미사 무관 substring 매칭 (기존 로직 유지).
+SCALE_BOX_NAME_KEYWORDS = (
+    "SCALE_BOX",
+    "50CM_X_50CM",
+    "50CMX50CM",
+    "50CM",
+    "50X50",       # 사장님 실증 케이스 (2026-07-14 — "50x50_32")
+    "50_X_50",
+    "50 X 50",
+    "SCALE",
+    "BOX",
+    "비율박스",     # 기존 유지
+    "비율_박스",    # 기존 유지
+)
 SCALE_BOX_SIZE_CM = 50.0  # 사장님 명시 표준 (단위 명시 — mm/inch 아님)
 SCALE_BOX_TARGET_CM = SCALE_BOX_SIZE_CM  # 후방 호환 alias
 SCALE_BOX_TOLERANCE_CM = 0.5  # ±0.5cm 이내 → 정상으로 판정
 
+# 50cm 정사각형이 각 단위 좌표계에서 갖는 변 길이(cm) + 허용오차 (사장님 지시 2026-07-14).
+#   inch/mm = "off-unit" — 자연스러운 조각 치수 아님 → Material 무관 감지 (정확 매칭, 추측 X).
+#   cm      = 자연 치수 가능 → Material:NON 확인 필요 (일반 정사각 조각 오검출 방지).
+SCALE_BOX_KNOWN_OFF_UNIT_CM = ((19.685, 0.5), (500.0, 5.0))  # (inch 좌표, mm 좌표)
+SCALE_BOX_KNOWN_CM = (50.0, 0.5)                             # cm 좌표 (기존)
+SCALE_BOX_SQUARE_RATIO_TOL = 0.05  # 정사각형 판정 — 변 길이 ±5%
+
+
+def _scale_box_is_square(w: float, h: float) -> bool:
+    """정사각형 판정 — 변 길이 ±5% (사장님 지시 2026-07-14). 스케일 박스는 정사각형."""
+    if w <= 0 or h <= 0:
+        return False
+    return abs(w - h) <= SCALE_BOX_SQUARE_RATIO_TOL * max(w, h)
+
+
+def _scale_box_known_off_unit(w: float, h: float) -> bool:
+    """정사각형 변 길이가 off-unit 표준값(inch 19.685 / mm 500)에 정확 매칭."""
+    for target, tol in SCALE_BOX_KNOWN_OFF_UNIT_CM:
+        if abs(w - target) <= tol and abs(h - target) <= tol:
+            return True
+    return False
+
+
+def _scale_box_known_cm(w: float, h: float) -> bool:
+    """정사각형 변 길이가 cm 표준값(50)에 정확 매칭."""
+    target, tol = SCALE_BOX_KNOWN_CM
+    return abs(w - target) <= tol and abs(h - target) <= tol
+
 
 def detect_scale_box_50cm(pieces: list[dict]) -> dict | None:
-    """50cm × 50cm 비율 박스 piece 검출 (사장님 명시 단위 명시 2026-05-07).
+    """50cm × 50cm 비율 박스 piece 검출 (사장님 견고성 증진 2026-07-14).
 
-    검출 조건 (모두 충족):
-      1) Material:NON (마카 제외)
-      2) piece_name 에 SCALE_BOX_NAME_KEYWORDS 중 하나 포함
-         OR 정사각형 (|w - h| < 0.5)
+    사장님 실증 (2026-07-14): PP 파일 스케일 박스가 이름 "50x50_32" + Material:SELF
+      (NON 아님) → 기존 is_non 게이트에서 제외되어 단위 보정 미실행. 견고화 필요.
+
+    검출 조건 (모두 정사각형 ±5% 필수 — 스케일 박스는 정사각형):
+      A) 이름 키워드 매칭 (piece_name/block_name) → Material 무관 (명시적 raw 증거)
+      B) off-unit 표준값 정사각형 (inch 19.685 / mm 500) → Material 무관
+         (자연 조각 치수 아님 = 명확한 스케일 박스 증거, 추측 X)
+      C) cm 표준값(50) 정사각형 → Material:NON 필요 (자연 치수 가능 → 오검출 방지)
+
     검출 불가 시 None.
     """
     candidates = []
     for p in pieces:
-        # 마카 제외 piece 만 후보
+        w = float(p.get("width_cm") or 0)
+        h = float(p.get("height_cm") or 0)
+        if not _scale_box_is_square(w, h):
+            continue  # 비정사각형 = 스케일 박스 아님 (추측 금지 — 배제)
+
+        nm = (p.get("piece_name") or "").upper()
+        bn = (p.get("block_name") or "").upper()  # 사장님 "50x50_32" 는 block_name
+        name_match = any((kw in nm) or (kw in bn) for kw in SCALE_BOX_NAME_KEYWORDS)
+
         raw = (p.get("material_raw") or p.get("material") or "").strip().upper()
         inferred = (p.get("material_inferred") or "").strip()
         is_non = inferred == "마카제외" or raw in {"NON", "NONE"}
-        if not is_non:
-            continue
 
-        nm = (p.get("piece_name") or "").upper()
-        w = float(p.get("width_cm") or 0)
-        h = float(p.get("height_cm") or 0)
-        is_square = w > 0 and abs(w - h) < 0.5
-        name_match = any(kw in nm for kw in SCALE_BOX_NAME_KEYWORDS)
+        off_unit = _scale_box_known_off_unit(w, h)
+        cm_size = _scale_box_known_cm(w, h)
 
-        if name_match or is_square:
+        # A) 이름 매칭 or B) off-unit → Material 무관. C) cm 표준값 → NON 필요.
+        qualifies = name_match or off_unit or (cm_size and is_non)
+        if qualifies:
             candidates.append({
                 "piece_id": p.get("piece_id", "?"),
                 "piece_name": p.get("piece_name") or "(empty)",
                 "measured_w_cm": w,
                 "measured_h_cm": h,
                 "name_match": name_match,
-                "is_square": is_square,
+                "is_square": True,
             })
 
     if not candidates:
         return None
 
-    # 이름 매칭이 있으면 우선, 없으면 정사각형 중 가장 큰 것
+    # 우선순위: 이름 매칭 우선. 없으면 보정 필요한(off-unit) 후보 우선
+    #   (50cm 자연 정사각 조각이 실제 off-unit 스케일 박스를 가리는 것 방지).
     name_matched = [c for c in candidates if c["name_match"]]
     if name_matched:
+        name_matched.sort(key=lambda c: c["measured_w_cm"], reverse=True)
         return name_matched[0]
-    candidates.sort(key=lambda c: c["measured_w_cm"], reverse=True)
-    return candidates[0]
+
+    needs_correction = [
+        c for c in candidates
+        if abs(c["measured_w_cm"] - SCALE_BOX_SIZE_CM) > SCALE_BOX_TOLERANCE_CM
+    ]
+    pool = needs_correction if needs_correction else candidates
+    pool.sort(key=lambda c: c["measured_w_cm"], reverse=True)
+    return pool[0]
 
 
 # 후방 호환 alias — 기존 호출자 보호 (deprecate 후 제거 예정)
@@ -565,7 +581,9 @@ def diagnose_scale(parsed: dict) -> dict:
     검출 불가 시: ✅ "박스 없음 — 협력사 가이드 §비율 검증 박스 참고" — 정보성.
     """
     pieces = parsed.get("pieces") or []
-    box = detect_scale_box_50cm(pieces)
+    # scale_box_info 우선 (move_scale_box_to_excluded 로 박스가 pieces 에서 빠져도
+    # 진단 정상 유지 — 2026-07-15). 없으면 pieces 에서 재감지 (기존 경로).
+    box = parsed.get("scale_box_info") or detect_scale_box_50cm(pieces)
     correction_applied = bool(parsed.get("scale_correction_applied"))
     correction_ratio = float(parsed.get("scale_correction_ratio") or 1.0)
     original_w = parsed.get("scale_correction_original_w_cm")
@@ -720,7 +738,60 @@ def apply_unit_correction_50cm_box(parsed: dict) -> dict:
     parsed["scale_correction_applied"] = True
     parsed["scale_correction_ratio"] = correction
     parsed["scale_correction_original_w_cm"] = measured_w
+    # scale_box_info 는 보정 후 측정값 반영 (박스도 ×correction 됨) — diagnose_scale
+    # delta 계산이 pieces 재감지 없이도 정확하도록 (박스 excluded 이동 대비 2026-07-15).
+    box = dict(box)
+    box["measured_w_cm"] = float(box["measured_w_cm"]) * correction
+    box["measured_h_cm"] = float(box["measured_h_cm"]) * correction
     parsed["scale_box_info"] = box
+    return parsed
+
+
+def move_scale_box_to_excluded(parsed: dict) -> dict:
+    """감지된 스케일 박스를 material 무관하게 pieces → excluded 이동 (사장님 확정 2026-07-15).
+
+    사장님 실증 (2026-07-15): PP 파일 스케일 박스가 Material:SELF 로 저장 → 마카제외
+      필터(Material=NON)에 안 걸려 pieces 에 잔존. 메인 파일은 Material:NON 이라 제외됨
+      → 두 파일 조각 개수 비대칭 → PP vs 메인 크기 순 매칭 어긋남.
+
+    사장님 원칙: "스케일 박스로 감지되면 material 무관 자동 제외."
+
+    apply_unit_correction_50cm_box 가 세팅한 scale_box_info(piece_id 포함)를 사용해
+    해당 piece 를 pieces 에서 제거하고 excluded 로 이동. 감지 조건은 변경하지 않음
+    (이미 감지된 박스를 이동만).
+    """
+    box = parsed.get("scale_box_info")
+    if not box:
+        return parsed  # 감지된 박스 없음 (또는 이미 파싱 단계 excluded 처리)
+    box_pid = box.get("piece_id")
+    if not box_pid:
+        return parsed
+
+    pieces = parsed.get("pieces") or []
+    kept: list[dict] = []
+    moved: dict | None = None
+    for p in pieces:
+        if moved is None and p.get("piece_id") == box_pid:
+            moved = p
+            continue
+        kept.append(p)
+
+    if moved is None:
+        return parsed  # 이미 pieces 에 없음 (파싱 단계 is_scale_box 로 제외됨)
+
+    parsed["pieces"] = kept
+    excluded = parsed.get("excluded")
+    if excluded is None:
+        excluded = []
+        parsed["excluded"] = excluded
+    excluded.append({
+        "block_name": moved.get("block_name"),
+        "piece_name": moved.get("piece_name") or "(empty)",
+        "size": moved.get("size"),
+        "bbox_cm": moved.get("bbox_cm"),
+        "material_raw": moved.get("material_raw") or moved.get("material") or "",
+        "reason": "scale_box",  # material 무관 스케일 박스 자동 제외 (사장님 2026-07-15)
+    })
     return parsed
 
 
@@ -814,10 +885,12 @@ def detect_violations(parsed: dict) -> list[dict]:
     """위반 알림 — 위반 시만 (사장님 본질 2026-05-05).
 
     위반 케이스 (협력사 메시지 자동 생성용):
-      - pattern_name_invalid: 표준 어휘집 외 명칭
       - quantity_missing: 갯수 메타 부재
       - material_missing: 원단 종류 미표기
       - grain_missing: 식서 LINE 부재 (Y kind 가 estimated 인 경우)
+
+    부위명(pattern_name_invalid) 위반은 사장님 확정 결정(2026-07-14)으로 폐기 —
+    PIECE NAME 필수 아님. 텍스트 표기 검증은 diagnose_text_encoding 이 담당.
 
     Material:NON 은 위반 X — 정보성 표시 (마카 제외 처리됨).
 
@@ -831,18 +904,8 @@ def detect_violations(parsed: dict) -> list[dict]:
     for p in parsed.get("pieces", []):
         pn = p.get("piece_name") or "(이름 없음)"
         raw_pn = p.get("piece_name_raw") or pn
-        is_std = bool(p.get("is_standard_name"))
 
-        # 1) 패턴 명칭 표준 외 — piece_name_raw 가 있을 때만 검증
-        if raw_pn and not is_std:
-            violations.append({
-                "type": "pattern_name_invalid",
-                "piece_name": pn,
-                "raw_name": raw_pn,
-                "detail": f"'{raw_pn}' 표준 어휘집 외 명칭",
-            })
-
-        # 2) 갯수 메타 부재
+        # 1) 갯수 메타 부재
         if p.get("quantity") is None:
             violations.append({
                 "type": "quantity_missing",
@@ -851,7 +914,7 @@ def detect_violations(parsed: dict) -> list[dict]:
                 "detail": "갯수 메타 없음",
             })
 
-        # 3) 원단 종류 미표기 — material_raw 비어있고 inferred 도 fallback
+        # 2) 원단 종류 미표기 — material_raw 비어있고 inferred 도 fallback
         raw_mat = (p.get("material_raw") or p.get("material") or "").strip()
         if not raw_mat:
             violations.append({
@@ -861,7 +924,7 @@ def detect_violations(parsed: dict) -> list[dict]:
                 "detail": "원단 종류 표기 없음",
             })
 
-        # 4) 식서 부재 — grain.estimated == True (LINE 못 찾고 bbox 추정 사용)
+        # 3) 식서 부재 — grain.estimated == True (LINE 못 찾고 bbox 추정 사용)
         grain = p.get("grain") or {}
         if grain.get("estimated"):
             violations.append({
@@ -883,7 +946,7 @@ def run_full_diagnosis(parsed: dict, doc=None, grain_layer: str | None = None) -
     return {
         "grain":    diagnose_grain(parsed, doc=doc, grain_layer=grain_layer),
         "material": diagnose_material(parsed),
-        "panel":    diagnose_panel(parsed),
+        "encoding": diagnose_text_encoding(parsed),
         "quantity": diagnose_quantity(parsed),
         "excluded": diagnose_excluded(parsed),
         # 사장님 본질 (2026-05-07) — DXF 스케일 검증 (50cm × 50cm 비율 박스)
@@ -908,19 +971,12 @@ def build_coop_message(parsed: dict, diag: dict) -> str:
             "모든 piece 의 Block ATTDEF 에 `Material:` 키로 표준 코드 표기 필요. "
             "NON 은 마카 제외 piece (예: 표시·도식)."
         )
-    if diag["panel"]["status"] in (WARN, FAIL):
-        d = diag["panel"]["raw"]
-        sub = []
-        if d.get("by_class", {}).get("non_standard", 0) > 0:
-            sub.append(
-                "표준 외 부위명 발견 → 표준 영문 부위명 (panel_mapping.json) 사용 또는 약자 매핑 추가 필요."
-            )
-        if d.get("by_class", {}).get("empty", 0) > 0:
-            sub.append("이름 누락 piece 발견 → 전 piece 에 Piece Name 부여.")
-        if sub:
-            items.append(
-                f"{len(items)+1}. **piece_name 부위명** — " + " ".join(sub)
-            )
+    if diag.get("encoding", {}).get("status") in (WARN, FAIL):
+        items.append(
+            f"{len(items)+1}. **텍스트 표기 (영문/숫자만)** — 조각 이름·원단·사이즈·주석에 "
+            "한글/중국어/일본어 등 비ASCII 문자가 있으면 인코딩 오류(글자 깨짐)가 발생할 수 있습니다. "
+            "국제 표준어(영문)와 숫자로만 표기하여 재저장 부탁드립니다."
+        )
     if diag["quantity"]["status"] in (WARN, FAIL):
         items.append(
             f"{len(items)+1}. **Quantity 메타** — 좌우 대칭 piece 는 2 로, 단일 piece 는 1 로 명시. "
@@ -938,8 +994,8 @@ def build_coop_message(parsed: dict, diag: dict) -> str:
         "Net(완성선) 만 포함된 경우 요척이 부족하게 산출됩니다."
     )
 
-    if not items or all(diag[k]["status"] == OK for k in ("material", "panel", "quantity", "grain")):
-        # 4가지 모두 OK 라도 시접은 항상 안내. 그래도 메시지 자체는 전달.
+    if not items or all(diag[k]["status"] == OK for k in ("material", "quantity", "grain")):
+        # 모두 OK 라도 시접은 항상 안내. 그래도 메시지 자체는 전달.
         pass
 
     body = "\n".join(items)
