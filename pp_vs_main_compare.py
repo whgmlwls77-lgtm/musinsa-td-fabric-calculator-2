@@ -27,6 +27,37 @@ SHAPE_MATCH_THRESHOLD = 0.85  # 사장님 확정 2026-07-15
                               # 근거: 사각 vs 원 극단 케이스 (0.830) 차단 최소값
                               # 사용자 조정 X (사장님 원칙 — 시스템 표준)
 
+# 재질 표준 코드(협력사 가이드 §4) ↔ 내부 추론값(infer_material_v3 결과, 한글) 매핑.
+# 축율 신고는 원단 코드(SELF/LINING/...) 기준 — 조각 material_inferred 를 코드로 역매핑.
+MATERIAL_CODE_TO_INFERRED = {
+    "SELF": "주원단",
+    "LINING": "안감",
+    "POCKETING": "포켓팅",
+    "CONTRAST": "배색",
+}
+_INFERRED_TO_CODE = {v: k for k, v in MATERIAL_CODE_TO_INFERRED.items()}
+
+
+def pair_material_code(pair: dict) -> str | None:
+    """매칭 쌍/미매칭 조각의 원단 표준 코드 (SELF/LINING/POCKETING/CONTRAST).
+
+    PP 조각 기준 (사장님 본질: 원단은 사용자 설정 그대로 — PP=축율 미반영 원본).
+    매칭 쌍은 'pp_piece', 미매칭 항목은 'piece' 키 사용. 표준 5종 외는 None.
+    """
+    ref = pair.get("pp_piece") or pair.get("piece") or {}
+    inferred = (ref.get("material_inferred") or "").strip()
+    return _INFERRED_TO_CODE.get(inferred)
+
+
+def filter_pairs_by_material(pairs: list[dict], material_filter: str) -> list[dict]:
+    """원단 필터 적용 — '전체'/빈값이면 전체, 코드면 해당 원단 조각만 (UI 표시용).
+
+    사장님 확정 2026-07-15: 원단별 검증 (조각 뒤섞임 방지).
+    """
+    if not material_filter or material_filter == "전체":
+        return list(pairs)
+    return [p for p in pairs if pair_material_code(p) == material_filter]
+
 
 def _is_marker_excluded(p: dict) -> bool:
     """스케일 박스 / Material:NON 마카제외 piece 판별.
@@ -43,6 +74,20 @@ def _piece_area(p: dict) -> float:
     """piece 면적 (cm²). parse_dxf_v3 의 area_cm2 (shapely polygon.area × 단위보정)."""
     a = p.get("area_cm2")
     return float(a) if a is not None else 0.0
+
+
+def _piece_bbox(coords_cm) -> tuple[float, float]:
+    """조각 bbox 크기 (가로, 세로 cm). 회전 정렬 없음 — raw 좌표 그대로 (사장님 원칙 #1).
+
+    주의: 식서 기준 정렬은 별도 로직 필요 (grain_extractor).
+    현 버전은 raw bbox 사용, 회전 정렬은 후속 태스크로 분리 (사장님 확정 2026-07-15).
+    좌표가 없으면 (0.0, 0.0) — 확대율 계산 시 호출자가 None 처리.
+    """
+    if not coords_cm:
+        return 0.0, 0.0
+    xs = [float(p[0]) for p in coords_cm]
+    ys = [float(p[1]) for p in coords_cm]
+    return max(xs) - min(xs), max(ys) - min(ys)
 
 
 def _thumb_ref(p: dict) -> dict:
@@ -64,6 +109,43 @@ def _expansion_pct(pp_area: float, main_area: float) -> float | None:
     if pp_area <= 0:
         return None
     return (main_area - pp_area) / pp_area * 100.0
+
+
+def _dim_expansion_pct(pp_dim: float, main_dim: float) -> float | None:
+    """가로/세로 확대율 (%) = (메인 - PP) / PP × 100. PP 치수 0 이면 None (계산 불가)."""
+    if pp_dim <= 0:
+        return None
+    return (main_dim - pp_dim) / pp_dim * 100.0
+
+
+def _matched_entry(pp_p: dict, main_p: dict, method: str, sim: float | None) -> dict:
+    """매칭된 PP↔메인 쌍 1건 dict 생성 (면적 + 가로/세로 bbox 확대율).
+
+    가로/세로 확대율은 raw bbox 기반 (회전 정렬 X — 사장님 원칙 #1, 후속 태스크로 분리).
+    면적 확대율(expansion_pct)은 기존 유지 (참고용).
+    """
+    pp_a = _piece_area(pp_p)
+    main_a = _piece_area(main_p)
+    pp_w, pp_h = _piece_bbox(pp_p.get("coords_cm"))
+    main_w, main_h = _piece_bbox(main_p.get("coords_cm"))
+    return {
+        "block_name_pp": (pp_p.get("block_name") or "").strip(),
+        "block_name_main": (main_p.get("block_name") or "").strip(),
+        "pp_area": pp_a,
+        "main_area": main_a,
+        "expansion_pct": _expansion_pct(pp_a, main_a),
+        # ── bbox 가로/세로 (사장님 확정 2026-07-15 — 축율 방향별 검증) ──
+        "pp_width_cm": pp_w,
+        "pp_height_cm": pp_h,
+        "main_width_cm": main_w,
+        "main_height_cm": main_h,
+        "width_expansion_pct": _dim_expansion_pct(pp_w, main_w),
+        "height_expansion_pct": _dim_expansion_pct(pp_h, main_h),
+        "match_method": method,
+        "similarity_score": sim,
+        "pp_piece": _thumb_ref(pp_p),
+        "main_piece": _thumb_ref(main_p),
+    }
 
 
 def _filter_pieces(pieces: list[dict], target_size: str) -> list[dict]:
@@ -100,6 +182,9 @@ def compare_pp_vs_main(
           {'block_name_pp', 'block_name_main', 'pp_area', 'main_area',
            'expansion_pct', 'match_method',        # 'block_name' | 'shape'
            'similarity_score',                     # shape 매칭만 float, 이름 매칭은 None
+           'pp_width_cm', 'pp_height_cm',          # bbox 가로/세로 (raw 좌표 — 회전 정렬 X)
+           'main_width_cm', 'main_height_cm',
+           'width_expansion_pct', 'height_expansion_pct',  # 방향별 확대율 (%) — PP 치수 0 이면 None
            'pp_piece', 'main_piece'},              # 썸네일 렌더용 slim 참조 (2026-07-15)
           ...
         ],
@@ -144,19 +229,7 @@ def compare_pp_vs_main(
             if not main_used[j]:
                 pp_used[i] = True
                 main_used[j] = True
-                pp_a = _piece_area(pp_p)
-                main_a = _piece_area(main[j])
-                matched.append({
-                    "block_name_pp": bn,
-                    "block_name_main": (main[j].get("block_name") or "").strip(),
-                    "pp_area": pp_a,
-                    "main_area": main_a,
-                    "expansion_pct": _expansion_pct(pp_a, main_a),
-                    "match_method": "block_name",
-                    "similarity_score": None,
-                    "pp_piece": _thumb_ref(pp_p),
-                    "main_piece": _thumb_ref(main[j]),
-                })
+                matched.append(_matched_entry(pp_p, main[j], "block_name", None))
                 break
 
     # ── Step 2: 남은 조각 도형 유사도 매칭 (사장님 확정 2026-07-15) ──
@@ -177,19 +250,7 @@ def compare_pp_vs_main(
             break   # 정렬돼 있으므로 이후는 전부 임계값 미만.
         if pp_used[i] or main_used[j]:
             continue
-        pp_a = _piece_area(pp[i])
-        main_a = _piece_area(main[j])
-        matched.append({
-            "block_name_pp": (pp[i].get("block_name") or "").strip(),
-            "block_name_main": (main[j].get("block_name") or "").strip(),
-            "pp_area": pp_a,
-            "main_area": main_a,
-            "expansion_pct": _expansion_pct(pp_a, main_a),
-            "match_method": "shape",
-            "similarity_score": sim,
-            "pp_piece": _thumb_ref(pp[i]),
-            "main_piece": _thumb_ref(main[j]),
-        })
+        matched.append(_matched_entry(pp[i], main[j], "shape", sim))
         pp_used[i] = True
         main_used[j] = True
 

@@ -75,7 +75,14 @@ from piece_thumbnail import (
     material_border_color,
     MATERIAL_BORDER_COLOR,
 )
-from pp_vs_main_compare import compare_pp_vs_main, SHAPE_MATCH_THRESHOLD
+from pp_vs_main_compare import (
+    compare_pp_vs_main,
+    filter_pairs_by_material,
+    pair_material_code,
+    MATERIAL_CODE_TO_INFERRED,
+    SHAPE_MATCH_THRESHOLD,
+)
+from axis_verdict import verdict_pair, INDUSTRY_MAX_AXIS_PCT
 from auto_nesting import nest_grading_marker, visualize_marker
 from auto_nesting_v2 import (
     nest_grading_marker_sparrow,
@@ -3744,22 +3751,26 @@ def _parse_uploaded_dxf(uploaded, label: str) -> dict | None:
     return parsed
 
 
+_AXIS_MATERIALS = ["SELF", "LINING", "POCKETING", "CONTRAST"]  # 축율 신고 대상 원단
+_AXIS_SEV_BG = {"critical": "#fee2e2", "warning": "#fef9c3", "ok": "#dcfce7"}
+DEFAULT_AXIS_MATERIAL = "SELF"  # 드롭다운 디폴트 (주원단 — 사장님 확정 2026-07-16)
+
+
 def render_pp_vs_main_tab() -> None:
-    """📐 축율 검증 UI (사장님 확정 사양 2026-07-15)."""
+    """📐 축율 검증 UI (사장님 확정 사양 2026-07-15 — Task #36)."""
     st.title("📐 축율 검증")
     st.caption(
-        "메인 그레이딩 패턴 기준 사이즈와 PP 패턴 면적을 비교 검증합니다.  \n"
-        "협력사 제출 축율 정보(원단 가로·세로 축율)와 비교해 허용 범위를 확인합니다."
+        "메인 패턴과 PP 패턴의 원단별 면적 비교 검증합니다.  \n"
+        "기준 축율 5% 초과, 협력사 신고 축율(가로·세로 %)과 대조해 위반을 자동 알림합니다."
     )
 
     # ── 업로드 2열 ──────────────────────────────────────────────
+    st.caption("DXF 패턴 파일을 업로드하세요")
     col_pp, col_main = st.columns(2)
     with col_pp:
-        st.markdown("#### PP 패턴")
-        pp_file = st.file_uploader("PP 패턴 DXF", type=["dxf"], key="pp_vs_main__pp")
+        pp_file = st.file_uploader("PP 패턴", type=["dxf"], key="pp_vs_main__pp")
     with col_main:
-        st.markdown("#### 메인 그레이딩 패턴")
-        main_file = st.file_uploader("메인 패턴 DXF", type=["dxf"], key="pp_vs_main__main")
+        main_file = st.file_uploader("메인 패턴", type=["dxf"], key="pp_vs_main__main")
 
     if pp_file is None or main_file is None:
         st.info("👆 PP 패턴과 메인 패턴 두 파일을 모두 업로드하면 비교가 시작됩니다.")
@@ -3797,31 +3808,169 @@ def render_pp_vs_main_tab() -> None:
         help="양쪽 파일에 공통으로 존재하는 사이즈. default 는 조각이 가장 많은 사이즈.",
     )
 
-    # ── 계산 ────────────────────────────────────────────────────
+    # ── 파일에서 실제 사용된 표준 원단 감지 (사장님 확정 2026-07-16 — Task #37) ──
+    _inferred_to_code = {v: k for k, v in MATERIAL_CODE_TO_INFERRED.items()}
+
+    def _used_material_codes() -> list[str]:
+        """PP + 메인 두 파일 target_size 조각의 실제 사용 원단 코드 (표준 4종 교집합).
+
+        하드코딩 제거 — 파일에 없는 원단은 드롭다운에 표시 X (사장님 확정 2026-07-16).
+        _AXIS_MATERIALS 순서 유지.
+        """
+        used = set()
+        for parsed in (pp_parsed, main_parsed):
+            for p in parsed["pieces"]:
+                if p.get("size") != target_size:
+                    continue
+                code = _inferred_to_code.get((p.get("material_inferred") or "").strip())
+                if code in _AXIS_MATERIALS:
+                    used.add(code)
+        return [c for c in _AXIS_MATERIALS if c in used]
+
+    used_codes = _used_material_codes()
+
+    # ── 협력사 신고 축율 (사장님 확정 2026-07-16 — 원단 선택 중심) ────
+    st.markdown("---")
+    st.subheader("📋 협력사 신고 축율")
+    if not used_codes:
+        st.info(
+            "표준 원단(SELF/LINING/POCKETING/CONTRAST)으로 인식된 조각이 없어 "
+            "축율 검증을 진행할 수 없습니다."
+        )
+        return
+    st.caption(
+        f"검증할 원단을 선택하세요. 실측이 신고값을 초과하면 ⚠️, "
+        f"실무 상한 {INDUSTRY_MAX_AXIS_PCT:.0f}%를 넘으면 🚨 (신고 무관)."
+    )
+
+    # 드롭다운 = 파일에서 실제 사용된 원단만 (전체 옵션 제거 — 원단별 개별 검증).
+    # 디폴트 = SELF (주원단). 없으면 첫 번째 실사용 원단 (사장님 확정 2026-07-16).
+    default_idx = (used_codes.index(DEFAULT_AXIS_MATERIAL)
+                   if DEFAULT_AXIS_MATERIAL in used_codes else 0)
+    material_filter = st.selectbox(
+        "🎯 검증 대상 원단",
+        options=used_codes,
+        index=default_idx,
+        key="pp_vs_main__matfilter",
+        help="두 파일에서 실제 사용된 원단만 표시됩니다.",
+    )
+
+    # 선택한 원단 1종만 신고 축율 카드 표시 (세로/가로 %).
+    st.markdown(f"**{material_filter}** 신고 축율")
+    fcol_v, fcol_h = st.columns(2)
+    with fcol_v:
+        decl_v = st.number_input("세로 %", key=f"pp_vs_main__axis_v_{material_filter}",
+                                 min_value=0.0, max_value=10.0, value=0.0, step=0.1)
+    with fcol_h:
+        decl_h = st.number_input("가로 %", key=f"pp_vs_main__axis_h_{material_filter}",
+                                 min_value=0.0, max_value=10.0, value=0.0, step=0.1)
+    axis_declarations: dict[str, dict[str, float]] = {
+        material_filter: {"vertical": decl_v, "horizontal": decl_h}
+    }
+    st.markdown("---")
+
+    # ── 계산 (전체) ─────────────────────────────────────────────
     result = compare_pp_vs_main(
         pp_parsed["pieces"], main_parsed["pieces"], target_size,
     )
 
-    # ── 결과 카드 3개 ───────────────────────────────────────────
+    # ── 원단 필터 적용 (표시 대상) ──────────────────────────────
+    shown_pairs = filter_pairs_by_material(result["matched_pairs"], material_filter)
+    shown_unmatched_pp = filter_pairs_by_material(result["unmatched_pp"], material_filter)
+    shown_unmatched_main = filter_pairs_by_material(result["unmatched_main"], material_filter)
+
+    # ── 결과 카드 3개 (선택 원단 스코프 — 사장님 확정 2026-07-16 Task #37-b) ──
+    # 선택 원단 = 매칭 쌍 + 미매칭 조각 전체 (Task #36 총계 의미 유지, 원단만 좁힘).
+    scoped_pp_total = (sum(m["pp_area"] for m in shown_pairs)
+                       + sum(u["area"] for u in shown_unmatched_pp))
+    scoped_main_total = (sum(m["main_area"] for m in shown_pairs)
+                         + sum(u["area"] for u in shown_unmatched_main))
+    scoped_exp = ((scoped_main_total - scoped_pp_total) / scoped_pp_total * 100.0
+                  if scoped_pp_total > 0 else None)
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.metric("PP 총면적", f"{result['pp_total_area_cm2']:,.1f} cm²")
+        st.metric(f"PP 총면적 ({material_filter})", f"{scoped_pp_total:,.1f} cm²")
     with c2:
-        st.metric("메인 총면적", f"{result['main_total_area_cm2']:,.1f} cm²")
+        st.metric(f"메인 총면적 ({material_filter})", f"{scoped_main_total:,.1f} cm²")
     with c3:
-        exp = result["total_expansion_pct"]
-        if exp is None:
-            st.metric("확대율", "계산 불가")
+        if scoped_exp is None:
+            st.metric(f"면적 확대율 ({material_filter})", "계산 불가")
         else:
-            st.metric("확대율", f"{exp:+.2f} %",
+            st.metric(f"면적 확대율 ({material_filter})", f"{scoped_exp:+.2f} %",
                       f"기준 사이즈 {target_size} · (메인−PP)/PP")
 
+    def _pair_verdict(m: dict):
+        """매칭 쌍 가로/세로 축율 판정 (해당 원단 신고값 대조). 좌표 없으면 None."""
+        wexp = m.get("width_expansion_pct")
+        hexp = m.get("height_expansion_pct")
+        if wexp is None or hexp is None:
+            return None
+        decl = axis_declarations.get(pair_material_code(m),
+                                     {"vertical": 0.0, "horizontal": 0.0})
+        # 가로 ↔ horizontal, 세로 ↔ vertical.
+        return verdict_pair(wexp, decl["horizontal"], hexp, decl["vertical"])
+
+    def _piece_label(m: dict) -> str:
+        return (m.get("block_name_pp") or m.get("block_name_main")
+                or m.get("block_name") or "(무명)")
+
+    # ── 경고 사유 알림 (사장님 확정 2026-07-15) ─────────────────
+    crit_msgs: list[str] = []
+    warn_msgs: list[str] = []
+    n_warn = n_crit = 0
+    for m in shown_pairs:
+        vd = _pair_verdict(m)
+        if vd is None:
+            continue
+        if vd["worst_severity"] == "critical":
+            n_crit += 1
+        elif vd["worst_severity"] == "warning":
+            n_warn += 1
+        label = _piece_label(m)
+        code = pair_material_code(m) or "?"
+        for dv in (vd["width"], vd["height"]):
+            if dv["severity"] == "critical":
+                crit_msgs.append(f"🚨 {label} ({code}): {dv['reason']}")
+            elif dv["severity"] == "warning":
+                warn_msgs.append(f"⚠️ {label} ({code}): {dv['reason']}")
+
+    st.markdown("#### 🔎 축율 판정")
+    if crit_msgs or warn_msgs:
+        for msg in crit_msgs:
+            st.error(msg)
+        for msg in warn_msgs:
+            st.warning(msg)
+    elif shown_pairs:
+        st.success("✅ 신고 축율 이내 — 위반 조각 없음.")
+    st.caption(f"⚠️ 축율 초과: {n_warn}건  /  🚨 상한 초과: {n_crit}건  "
+               f"(대상 원단: {material_filter})")
+
+    # ── 원단별 요약 카드 (사장님 확정 2026-07-15) ───────────────
+    def _pct_disp(v):
+        return f"{v:+.1f}%" if v is not None else "—"
+
+    by_mat: dict[str, list[dict]] = {}
+    for m in shown_pairs:
+        by_mat.setdefault(pair_material_code(m) or "기타", []).append(m)
+    if by_mat:
+        st.markdown("##### 원단별 요약")
+        for code, ms in by_mat.items():
+            parts = []
+            for m in ms:
+                vd = _pair_verdict(m)
+                lbl = vd["worst_label"] if vd else "❓"
+                parts.append(
+                    f"{_piece_label(m)} 가로{_pct_disp(m.get('width_expansion_pct'))}"
+                    f"/세로{_pct_disp(m.get('height_expansion_pct'))} {lbl}"
+                )
+            st.markdown(f"**{code}** — " + ", ".join(parts))
+
     # ── 조각별 상세 (default 접힘) ──────────────────────────────
-    # 사장님 지시 2026-07-15: PP/메인 조각 썸네일 나란히 → 크기 순 오매칭 시각 판별.
-    # st.dataframe 은 이미지 미지원 → st.columns 행 반복으로 렌더.
-    with st.expander("조각별 상세 (썸네일 + 매칭 방식)", expanded=False):
+    # 사장님 지시 2026-07-15: PP/메인 썸네일 나란히 + 가로/세로/면적 확대율 + 판정 라벨.
+    with st.expander("조각별 상세 (썸네일 + 가로/세로/면적 확대율 + 판정)", expanded=False):
         THUMB_PX = 120
-        COL_RATIO = [1.4, 1.7, 1.0, 1.4, 1.0, 0.9, 1.2]
+        COL_RATIO = [1.2, 1.2, 1.4, 1.5, 1.5, 1.0, 1.2]
 
         def _method_disp(m: dict) -> str:
             """매칭 근거 라벨 (사장님 원칙 #2 — 근거 없는 결과 표시 금지).
@@ -3841,22 +3990,34 @@ def render_pp_vs_main_tab() -> None:
                 return txt
             return m["match_method"]
 
-        has_any = bool(result["matched_pairs"] or result["unmatched_pp"]
-                       or result["unmatched_main"])
+        def _axis_cell(actual, dv_dir) -> str:
+            """가로/세로 확대율 셀 (실측% + 판정 라벨 배경색)."""
+            if actual is None:
+                return "—"
+            txt = f"{actual:+.1f}%"
+            if dv_dir is None:
+                return txt
+            bg = _AXIS_SEV_BG.get(dv_dir["severity"], "#f3f4f6")
+            return (f'<span style="background:{bg};padding:2px 6px;'
+                    f'border-radius:4px;">{dv_dir["label"]} {txt}</span>')
+
+        def _exp_disp(v):
+            return f"{v:+.2f} %" if v is not None else "계산 불가"
+
+        has_any = bool(shown_pairs or shown_unmatched_pp or shown_unmatched_main)
         if not has_any:
-            st.caption("(비교할 조각이 없습니다)")
+            st.caption("(표시할 조각이 없습니다 — 원단 필터 확인)")
         else:
-            # 헤더
             hc = st.columns(COL_RATIO)
-            for col, txt in zip(hc, ["PP", "블록 이름", "PP 면적", "메인",
-                                     "메인 면적", "확대율", "매칭 방식"]):
+            for col, txt in zip(hc, ["PP", "메인", "블록 이름", "가로 확대율",
+                                     "세로 확대율", "면적 확대율", "매칭 방식"]):
                 col.markdown(f"**{txt}**")
 
-            def _exp_disp(v):
-                return f"{v:+.2f} %" if v is not None else "계산 불가"
-
             # 매칭된 쌍
-            for m in result["matched_pairs"]:
+            for m in shown_pairs:
+                vd = _pair_verdict(m)
+                w_dir = vd["width"] if vd else None
+                h_dir = vd["height"] if vd else None
                 block_disp = (
                     m["block_name_pp"]
                     if m["block_name_pp"] == m["block_name_main"]
@@ -3865,72 +4026,52 @@ def render_pp_vs_main_tab() -> None:
                 rc = st.columns(COL_RATIO)
                 rc[0].markdown(_axul_thumb_html(m.get("pp_piece"), THUMB_PX),
                                unsafe_allow_html=True)
-                rc[1].markdown(block_disp or "(무명)")
-                rc[2].markdown(f"{m['pp_area']:,.1f} cm²")
-                rc[3].markdown(_axul_thumb_html(m.get("main_piece"), THUMB_PX),
+                rc[1].markdown(_axul_thumb_html(m.get("main_piece"), THUMB_PX),
                                unsafe_allow_html=True)
-                rc[4].markdown(f"{m['main_area']:,.1f} cm²")
+                rc[2].markdown(block_disp or "(무명)")
+                rc[3].markdown(_axis_cell(m.get("width_expansion_pct"), w_dir),
+                               unsafe_allow_html=True)
+                rc[4].markdown(_axis_cell(m.get("height_expansion_pct"), h_dir),
+                               unsafe_allow_html=True)
                 rc[5].markdown(_exp_disp(m["expansion_pct"]))
                 rc[6].markdown(_method_disp(m), unsafe_allow_html=True)
 
             # PP 만 있음 (메인 매칭 없음)
-            for u in result["unmatched_pp"]:
+            for u in shown_unmatched_pp:
                 rc = st.columns(COL_RATIO)
                 rc[0].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
                                unsafe_allow_html=True)
-                rc[1].markdown((u["block_name"] or "(무명)") + " (PP만)")
-                rc[2].markdown(f"{u['area']:,.1f} cm²")
-                rc[3].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
+                rc[1].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
+                rc[2].markdown((u["block_name"] or "(무명)") + " (PP만)")
+                rc[3].markdown("—")
                 rc[4].markdown("—")
                 rc[5].markdown("—")
                 rc[6].markdown("❌ 매칭 없음")
 
             # 메인 만 있음 (PP 매칭 없음)
-            for u in result["unmatched_main"]:
+            for u in shown_unmatched_main:
                 rc = st.columns(COL_RATIO)
                 rc[0].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
-                rc[1].markdown((u["block_name"] or "(무명)") + " (메인만)")
-                rc[2].markdown("—")
-                rc[3].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
+                rc[1].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
                                unsafe_allow_html=True)
-                rc[4].markdown(f"{u['area']:,.1f} cm²")
+                rc[2].markdown((u["block_name"] or "(무명)") + " (메인만)")
+                rc[3].markdown("—")
+                rc[4].markdown("—")
                 rc[5].markdown("—")
                 rc[6].markdown("❌ 매칭 없음")
 
-        # 총계 행 (합계 + 평균 확대율).
+        # 총계 행 (합계 + 평균 면적 확대율 — 전체 기준).
         exp_vals = [m["expansion_pct"] for m in result["matched_pairs"]
                     if m["expansion_pct"] is not None]
         avg_exp = (sum(exp_vals) / len(exp_vals)) if exp_vals else None
         total_exp = result["total_expansion_pct"]
         st.markdown(
-            f"**총계** — PP {result['pp_total_area_cm2']:,.1f} cm² · "
+            f"**총계 (전체)** — PP {result['pp_total_area_cm2']:,.1f} cm² · "
             f"메인 {result['main_total_area_cm2']:,.1f} cm² · "
             f"총면적 확대율 {('%.2f%%' % total_exp) if total_exp is not None else '계산 불가'} · "
-            f"조각 평균 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
+            f"조각 평균 면적 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
             f"(매칭 {len(result['matched_pairs'])}쌍)"
         )
-
-    # ── 협력사 신고 축율 대조 (선택) ────────────────────────────
-    st.markdown("#### 협력사 신고 축율 대조 (선택)")
-    st.caption("협력사가 신고한 축율과 시스템 계산 확대율을 나란히 표시합니다 (경고 없음 · 사장님 판정).")
-    col_v, col_h = st.columns(2)
-    with col_v:
-        declared_v = st.number_input("협력사 신고 세로 축율 (%)", value=0.0, step=0.1,
-                                     key="pp_vs_main__declared_v", format="%.2f")
-    with col_h:
-        declared_h = st.number_input("협력사 신고 가로 축율 (%)", value=0.0, step=0.1,
-                                     key="pp_vs_main__declared_h", format="%.2f")
-
-    if declared_v != 0.0 or declared_h != 0.0:
-        exp = result["total_expansion_pct"]
-        sys_disp = f"{exp:+.2f} %" if exp is not None else "계산 불가"
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            st.metric("신고 세로 축율", f"{declared_v:+.2f} %")
-        with d2:
-            st.metric("신고 가로 축율", f"{declared_h:+.2f} %")
-        with d3:
-            st.metric("시스템 계산 면적 확대율", sys_disp)
 
 
 def main() -> None:
