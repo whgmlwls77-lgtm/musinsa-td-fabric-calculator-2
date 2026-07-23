@@ -36,7 +36,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage,
+    PageBreak,
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -44,6 +45,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 # Excel
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.worksheet.properties import PageSetupProperties
 
 # ── 기존 스크립트(V3 에서 저수준만 재사용) ────────────────────
 from extract_pieces import (
@@ -83,6 +86,9 @@ from pp_vs_main_compare import (
     SHAPE_MATCH_THRESHOLD,
 )
 from axis_verdict import verdict_pair, INDUSTRY_MAX_AXIS_PCT
+from axis_report_pdf import build_axis_pdf
+from axis_report_xlsx import build_axis_xlsx
+from svg_render import svg_to_png
 from auto_nesting import nest_grading_marker, visualize_marker
 from auto_nesting_v2 import (
     nest_grading_marker_sparrow,
@@ -2724,6 +2730,119 @@ def figure_to_png_bytes(fig: plt.Figure, dpi: int = 120) -> bytes:
     return buf.getvalue()
 
 
+def _marker_png_for_material(res: dict) -> bytes | None:
+    """재질별 마카 배치도 → PNG bytes (sparrow 원본 SVG 그대로 cairosvg 렌더).
+
+    Task #38-b (사장님 확정 2026-07-23): matplotlib 재렌더링(라벨/타이틀 겹침) 폐기 →
+    UI 화면에 표시되는 sparrow 원본 SVG 를 그대로 래스터해 임베드 (화면과 동일 품질).
+    UI 와 동일하게 humanized(한글 라벨) SVG 우선. SVG 자체 수정 X.
+    렌더 실패/SVG 부재 시 None (추측 이미지 생성 X — 사장님 원칙 #1).
+    """
+    if not res or res.get("error"):
+        return None
+    svg = res.get("svg_content_humanized") or res.get("svg_content") or ""
+    if not svg:
+        return None
+    return svg_to_png(svg, output_width=1400)
+
+
+# ── v33 PDF 행 구성 순수 헬퍼 (Task #38-b — 테스트 가능 · generate 와 단일 소스) ──
+def _v33_summary_rows(context: dict) -> list:
+    """스타일 요약 kv (사이즈 1개 통합 · 엔진 필드 없음)."""
+    size_disp = ", ".join(context.get("selected_sizes", [])) or (context.get("sample_size") or "-")
+    return [
+        ["스타일", context.get("style") or "-"],
+        ["사이즈", size_disp],
+        ["파일", context.get("file_name") or "-"],
+        ["작성일", context.get("generated_at") or "-"],
+    ]
+
+
+def _v33_overview_rows(summary_rows: list) -> list:
+    """재질별 요척 종합표 (헤더 + 재질행, 합계 행 없음)."""
+    rows = [["원단 종류", "원단 폭", "마카 길이", "효율", "패턴 갯수", "마카 갯수", "요척"]]
+    for r in summary_rows:
+        tg = r.get("total_garments", 1)
+        n_total = (r["pieces_count"] + r["mirror_count"]) * (tg if tg > 1 else 1)
+        rows.append([
+            r["material"],
+            f"{r['fabric_width_cm']:.0f} cm",
+            f"{r['marker_length_cm']:.1f} cm",
+            f"{r['efficiency_pct']:.1f} %",
+            f"{r['pieces_count']}",
+            f"{n_total}",
+            f"{r['marker_length_yd']:.2f} yd",
+        ])
+    return rows
+
+
+def _v33_material_detail_rows(row: dict) -> list:
+    """재질별 상세 kv (배치 실패 · 처리 시간 필드 없음 — Task #38-b)."""
+    n_pat = row["pieces_count"]
+    tg = row.get("total_garments", 1)
+    n_total = (n_pat + row["mirror_count"]) * (tg if tg > 1 else 1)
+    detail = [
+        ["원단 폭", f"{row['fabric_width_cm']:.0f} cm"],
+        ["마카 길이", f"{row['marker_length_cm']:.1f} cm  ({row['marker_length_yd']:.2f} yd)"],
+        ["효율", f"{row['efficiency_pct']:.2f} %"],
+        ["패턴 갯수 (1벌당)", f"{n_pat} 개"],
+        ["마카 갯수 (전체)", f"{n_total} 개"],
+        ["마카 벌수", f"{tg} 벌 (다중 사이즈)" if tg > 1 else "1 벌 (단일 사이즈)"],
+    ]
+    if tg > 1:
+        detail.append(["1벌당 마카 길이",
+                       f"{row.get('cm_per_garment', 0):.1f} cm  ({row.get('yards_per_garment', 0):.3f} yd)"])
+    return detail
+
+
+def _rl_image_fit(png: bytes, max_w: float = 500.0, max_h: float = 320.0) -> RLImage:
+    """PNG bytes → 종횡비 유지 RLImage (A4 폭 안에 맞춤)."""
+    from reportlab.lib.utils import ImageReader
+    w, h = ImageReader(io.BytesIO(png)).getSize()
+    ratio = min(max_w / w, max_h / h, 1.0)
+    return RLImage(io.BytesIO(png), width=w * ratio, height=h * ratio)
+
+
+def _fit_into(w: float, h: float, area_w: float, area_h: float) -> tuple[float, float]:
+    """(w,h) → (area_w,area_h) 영역 안에 종횡비 유지 max-fit. 한 변이 영역에 딱 맞음.
+
+    Task #38-e: 원단마다 배치도 비율(가로형/세로형)이 달라도 동일 영역에 fit →
+    페이지 레이아웃 통일. 업스케일 허용 (작은 SVG 도 영역 채움 → 크기 일관).
+    """
+    ratio = min(area_w / w, area_h / h)
+    return w * ratio, h * ratio
+
+
+# 배치도 고정 영역 (원단 무관 동일 — 사장님 확정 2026-07-23 Task #38-e).
+_PDF_MARKER_AREA_W = 515.0   # A4 usable 폭 (595 − 좌우 36pt 여백)
+_PDF_MARKER_AREA_H = 340.0   # ≈ 12cm
+_XLSX_MARKER_W = 720.0       # px
+_XLSX_MARKER_H = 400.0       # px
+
+
+def _rl_marker_fixed_area(png: bytes,
+                          area_w: float = _PDF_MARKER_AREA_W,
+                          area_h: float = _PDF_MARKER_AREA_H) -> Table:
+    """배치도 PNG → 고정 크기 영역 중앙에 max-fit 배치 (모든 원단 페이지 동일 레이아웃).
+
+    가로형 → 폭 채움·상하 여백 / 세로형 → 높이 채움·좌우 여백. 영역 크기는 원단 무관 고정.
+    """
+    from reportlab.lib.utils import ImageReader
+    w, h = ImageReader(io.BytesIO(png)).getSize()
+    fw, fh = _fit_into(w, h, area_w, area_h)
+    img = RLImage(io.BytesIO(png), width=fw, height=fh)
+    t = Table([[img]], colWidths=[area_w], rowHeights=[area_h])
+    t.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
+
+
 def _pdf_kv_table(data, font_name, col_widths=(110, 330)) -> Table:
     t = Table(data, colWidths=col_widths)
     t.setStyle(TableStyle([
@@ -2935,55 +3054,23 @@ def generate_pdf_report_v33(context: dict) -> bytes:
     style_label = context.get("style") or context.get("file_name", "STYLE")
     elements.append(Paragraph(f"원단 요척 보고서 — {style_label}", title_style))
 
-    # 메타 요약
+    # 메타 요약 (Task #38-b: 샘플/계산 사이즈 → '사이즈' 1개 통합, 엔진 필드 삭제)
     elements.append(Paragraph("스타일 요약", section_style))
-    summary = [
-        ["스타일", context.get("style") or "-"],
-        ["샘플사이즈", context.get("sample_size") or "-"],
-        ["계산 사이즈", ", ".join(context.get("selected_sizes", []))],
-        ["파일", context.get("file_name") or "-"],
-        ["엔진", f"jagua-rs sparrow ({context.get('runtime_seconds_used', 30)}s)"],
-        ["작성일", context.get("generated_at") or "-"],
-    ]
-    elements.append(_pdf_kv_table(summary, KR_FONT))
+    elements.append(_pdf_kv_table(_v33_summary_rows(context), KR_FONT))
 
-    # 종합 표 (재질별)
-    elements.append(Paragraph("재질별 요척 (자동 마카 배치)", section_style))
+    # 종합 표 (재질별 요척 — Task #38-b: 타이틀 축약 + 합계 행 삭제)
+    elements.append(Paragraph("재질별 요척", section_style))
     total_yd = sum(r["marker_length_yd"] for r in summary_rows)
     total_m = total_yd * 0.9144
 
-    header = ["원단 종류", "원단 폭", "마카 길이", "효율", "패턴 갯수", "마카 갯수", "요척"]
-    rows = [header]
-    for r in summary_rows:
-        n_pat = r["pieces_count"]
-        n_mir = r["mirror_count"]
-        tg = r.get("total_garments", 1)
-        per_garment = n_pat + n_mir
-        n_total = per_garment * (tg if tg > 1 else 1)
-        rows.append([
-            r["material"],
-            f"{r['fabric_width_cm']:.0f} cm",
-            f"{r['marker_length_cm']:.1f} cm",
-            f"{r['efficiency_pct']:.1f} %",
-            f"{n_pat}",
-            f"{n_total}",
-            f"{r['marker_length_yd']:.2f} yd",
-        ])
-    # 합계 행
-    rows.append([
-        "합계", "—", "—", "—", "—", "—",
-        f"{total_yd:.2f} yd",
-    ])
+    rows = _v33_overview_rows(summary_rows)
     t = Table(rows, colWidths=[70, 55, 65, 50, 60, 60, 60])
-    last_row = len(rows) - 1
     t.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), KR_FONT),
         ("FONTSIZE", (0, 0), (-1, -1), 10),
         ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#0f172a")),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f8fafc")),
-        ("BACKGROUND", (0, last_row), (-1, last_row), colors.HexColor("#fef2f2")),
-        ("FONTNAME", (0, last_row), (-1, last_row), KR_FONT),
         ("ALIGN", (1, 0), (-1, -1), "CENTER"),
         ("ALIGN", (0, 0), (0, -1), "CENTER"),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
@@ -2999,39 +3086,34 @@ def generate_pdf_report_v33(context: dict) -> bytes:
     ))
     elements.append(Spacer(1, 12))
 
-    # 재질별 상세 (메트릭만)
-    elements.append(Paragraph("재질별 상세", section_style))
-    for mat in materials_ordered:
+    # 재질별 상세 + 배치도 (Task #38-b: 재질별로 [상세 → 배치도] 묶음, 재질 간 PageBreak).
+    # 배치 실패/처리 시간 필드 삭제. 배치도 = sparrow 원본 SVG 그대로 (matplotlib 폐기).
+    mats_rendered = [m for m in materials_ordered
+                     if by_material.get(m) is not None
+                     and next((r for r in summary_rows if r["material"] == m), None) is not None]
+    for idx, mat in enumerate(mats_rendered):
         res = by_material.get(mat)
         row = next((r for r in summary_rows if r["material"] == mat), None)
-        if res is None or row is None:
-            continue
-        elements.append(Spacer(1, 4))
-        elements.append(Paragraph(f"<b>● {mat}</b>", body_style))
+        elements.append(Paragraph(f"재질별 상세 — {mat}", section_style))
         if res.get("error"):
             elements.append(Paragraph(f"❌ 마카 배치 실패: {res['error']}", body_style))
-            continue
-        n_pat = row["pieces_count"]
-        n_mir = row["mirror_count"]
-        tg = row.get("total_garments", 1)
-        per_garment = n_pat + n_mir
-        n_total = per_garment * (tg if tg > 1 else 1)
-        detail = [
-            ["원단 폭", f"{row['fabric_width_cm']:.0f} cm"],
-            ["마카 길이", f"{row['marker_length_cm']:.1f} cm  ({row['marker_length_yd']:.2f} yd)"],
-            ["효율", f"{row['efficiency_pct']:.2f} %"],
-            ["패턴 갯수 (1벌당)", f"{n_pat} 개"],
-            ["마카 갯수 (전체)", f"{n_total} 개"],
-            ["마카 벌수", f"{tg} 벌 (다중 사이즈)" if tg > 1 else "1 벌 (단일 사이즈)"],
-        ]
-        if tg > 1:
-            detail.append(["1벌당 마카 길이",
-                           f"{row.get('cm_per_garment', 0):.1f} cm  ({row.get('yards_per_garment', 0):.3f} yd)"])
-        detail.extend([
-            ["배치 실패", str(len(res.get("unplaced", [])))],
-            ["처리 시간", f"{row['runtime_actual_sec']:.1f} 초"],
-        ])
-        elements.append(_pdf_kv_table(detail, KR_FONT, col_widths=(110, 330)))
+        else:
+            elements.append(_pdf_kv_table(_v33_material_detail_rows(row), KR_FONT,
+                                          col_widths=(110, 330)))
+
+            # 배치도 (sparrow 원본 SVG → PNG) — 고정 영역 max-fit (원단 무관 동일 레이아웃).
+            png = _marker_png_for_material(res)
+            if png:
+                elements.append(Spacer(1, 6))
+                elements.append(Paragraph("마카 배치도", body_style))
+                try:
+                    elements.append(_rl_marker_fixed_area(png))
+                except Exception:
+                    elements.append(Paragraph("(마카 이미지 생성 실패)", small_caption))
+
+        # 재질 간 페이지 분리 (마지막 재질 뒤엔 X).
+        if idx < len(mats_rendered) - 1:
+            elements.append(PageBreak())
 
     # 본사 매칭 비교 (Phase 2-B-5 — 마카 구성 차이 명시)
     if hq_match:
@@ -3103,8 +3185,7 @@ def generate_pdf_report_v33(context: dict) -> bytes:
     # 푸터
     elements.append(Spacer(1, 16))
     elements.append(Paragraph(
-        f"엔진: jagua-rs sparrow  ·  생성일: {context.get('generated_at')}  ·  "
-        f"파일: {context.get('file_name')}",
+        f"생성일: {context.get('generated_at')}  ·  파일: {context.get('file_name')}",
         small_caption,
     ))
 
@@ -3201,201 +3282,178 @@ def generate_excel_v3(
 # ╔════════════════════════════════════════════════════════════╗
 # ║ v3.3 Excel 생성 (재질별 마카 결과 → 다중 시트)              ║
 # ╚════════════════════════════════════════════════════════════╝
+# 재질 추론값(한글) → 표준 원단 코드 (시트명/태그용).
+_EXCEL_INFERRED_TO_CODE = {v: k for k, v in MATERIAL_CODE_TO_INFERRED.items()}
+
+
+def _excel_marker_image(res: dict):
+    """재질별 마카 배치도 → openpyxl Image (sparrow 원본 SVG, 한글 폰트 주입).
+
+    Task #38-d: PDF(Task #38-b/c)와 동일 렌더 (svg_render 재사용). SVG 원본 미변경.
+    렌더/SVG 부재 시 None.
+    """
+    if not res or res.get("error"):
+        return None
+    svg = res.get("svg_content_humanized") or res.get("svg_content") or ""
+    if not svg:
+        return None
+    png = svg_to_png(svg, output_width=1400)
+    if not png:
+        return None
+    try:
+        from PIL import Image as PILImage
+        w, h = PILImage.open(io.BytesIO(png)).size
+        img = XLImage(io.BytesIO(png))
+        # Task #38-e: 폭·높이 모두 고정 영역에 max-fit → 원단 무관 시트별 크기 통일.
+        fw, fh = _fit_into(w, h, _XLSX_MARKER_W, _XLSX_MARKER_H)
+        img.width = fw
+        img.height = fh
+        return img
+    except Exception:
+        return None
+
+
 def generate_excel_report_v33(context: dict) -> bytes:
     """
     v3.3 자동 마카 배치 결과 → Excel (.xlsx).
 
-    시트 구성:
-      ① 종합요약 — 메타 + 재질별 1행 + 합계
-      ② 본사비교 — hq_match 있을 때만 (생략 가능)
-      ③ {재질명}_상세 — 재질별 placements + 메트릭
+    Task #38-d 재작성 (사장님 확정 2026-07-23):
+      - 원단(재질)별 개별 시트 (사용된 재질만) — 시트명 = 원단 코드 (SELF/LINING/…).
+      - 각 시트: 프로그램 자동 산출 요척 필드 + 사이즈 비율 + 마카 배치도 이미지.
+      - 협력사/담당자·축율 신고·재질 코드 컬럼·코멘트·제출일 = 삭제 (사람 채우는 필드 X).
+      - 배치도 = PDF 와 동일 sparrow 원본 SVG 렌더 (svg_render 재사용, 한글 폰트 주입).
+      - A4 가로 · 1 시트 = 1 원단 = 1 페이지 fit.
     """
     nest_all = context["nest_all"]
-    hq_match = context.get("hq_match")
     summary_rows = nest_all.get("summary_rows", [])
     by_material = nest_all.get("by_material", {})
     materials_ordered = nest_all.get("materials_ordered", [])
+    style_label = context.get("style") or context.get("file_name") or "STYLE"
+    loss_pct = float(context.get("loss_pct", 0.0) or 0.0)
 
-    wb = Workbook()
-
-    # ── 공통 스타일 ──
-    header_font = Font(bold=True, color="FFFFFF")
-    header_fill = PatternFill("solid", fgColor="0F172A")
-    sub_font = Font(bold=True)
-    sub_fill = PatternFill("solid", fgColor="F8FAFC")
-    total_fill = PatternFill("solid", fgColor="FEF2F2")
+    # 스타일
+    title_font = Font(bold=True, size=16, color="DC2626")     # 큰 붉은 헤더
+    brand_font = Font(bold=True, size=9, color="64748B")
+    tag_font = Font(bold=True, size=12, color="0F172A")
+    label_font = Font(bold=True, color="0F172A")
+    label_fill = PatternFill("solid", fgColor="F1F5F9")
+    size_fill = PatternFill("solid", fgColor="FFEDD5")        # 사이즈 오렌지 강조
+    size_font = Font(bold=True, color="9A3412")
+    section_font = Font(bold=True, color="0369A1")
     thin = Side(style="thin", color="CBD5E1")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
 
-    def _style_header(ws, row_idx):
-        for cell in ws[row_idx]:
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+    def _size_ratio_disp(row_meta) -> str:
+        """사이즈 갯수/비율 — marker_config summary 우선, 없으면 벌수 : 사이즈 목록."""
+        mc = context.get("marker_config") or {}
+        summ = mc.get("summary_text")
+        if summ:
+            return str(summ)
+        tg = row_meta.get("total_garments", 1)
+        sizes = context.get("selected_sizes", [])
+        return f"{tg} : {', '.join(sizes)}" if sizes else f"{tg} 벌"
 
-    def _autosize(ws, max_width=42):
-        for col in ws.columns:
-            letter = col[0].column_letter
-            maxw = 0
-            for cell in col:
-                v = "" if cell.value is None else str(cell.value)
-                disp = sum(2 if ord(c) > 127 else 1 for c in v)
-                if disp > maxw:
-                    maxw = disp
-            ws.column_dimensions[letter].width = min(maxw + 2, max_width)
+    wb = Workbook()
+    wb.remove(wb.active)  # 기본 시트 제거 (재질별로만 생성)
 
-    # ─────────── 시트 1: 종합요약 ───────────
-    ws1 = wb.active
-    ws1.title = "종합요약"
-    # 메타
-    meta = [
-        ["스타일", context.get("style") or "-"],
-        ["샘플사이즈", context.get("sample_size") or "-"],
-        ["계산 사이즈", ", ".join(context.get("selected_sizes", []))],
-        ["파일", context.get("file_name") or "-"],
-        ["엔진", f"jagua-rs sparrow ({context.get('runtime_seconds_used', 30)}s)"],
-        ["작성일", context.get("generated_at") or "-"],
-    ]
-    for row in meta:
-        ws1.append(row)
-        ws1.cell(ws1.max_row, 1).font = sub_font
-    ws1.append([])
-
-    # 재질별 표 (라벨 통일: 패턴 갯수 / 마카 갯수)
-    headers = ["원단 종류", "원단 폭(cm)", "마카 길이(cm)", "마카 길이(yd)",
-               "효율(%)", "패턴 갯수", "마카 갯수", "마카 벌수", "1벌당 요척(yd)", "처리시간(s)"]
-    ws1.append(headers)
-    hdr_row = ws1.max_row
-    total_yd = 0
-    total_yd_per = 0
-    is_multi = any(r.get("total_garments", 0) > 1 for r in summary_rows)
-    for r in summary_rows:
-        n_pat = r["pieces_count"]
-        n_mir = r["mirror_count"]
-        tg = r.get("total_garments", 1)
-        per_garment = n_pat + n_mir
-        n_total = per_garment * (tg if tg > 1 else 1)
-        yd_per = r.get("yards_per_garment") or r["marker_length_yd"]
-        ws1.append([
-            r["material"], round(r["fabric_width_cm"], 0),
-            round(r["marker_length_cm"], 1), round(r["marker_length_yd"], 3),
-            round(r["efficiency_pct"], 2),
-            n_pat, n_total, tg, round(yd_per, 3),
-            round(r.get("runtime_actual_sec", 0), 1),
-        ])
-        total_yd += r["marker_length_yd"]
-        total_yd_per += yd_per
-
-    # 합계 행
-    ws1.append([
-        "합계", "—", "—", round(total_yd, 3), "—",
-        "—", "—", "—", round(total_yd_per, 3) if is_multi else "—", "—",
-    ])
-    total_row = ws1.max_row
-    for cell in ws1[total_row]:
-        cell.font = sub_font
-        cell.fill = total_fill
-        cell.border = border
-        cell.alignment = Alignment(horizontal="center")
-    _style_header(ws1, hdr_row)
-    for row_idx in range(hdr_row + 1, total_row):
-        for cell in ws1[row_idx]:
-            cell.border = border
-            cell.alignment = Alignment(horizontal="center")
-    _autosize(ws1)
-
-    # ─────────── 시트 2: 본사 비교 (있을 때만) ───────────
-    if hq_match:
-        ws_hq = wb.create_sheet("본사비교")
-        main_row = next((r for r in summary_rows if r["material"] == "주원단"), None)
-        if main_row is None and summary_rows:
-            main_row = summary_rows[0]
-        if main_row:
-            hq_eff = safe_float(hq_match.get("효율_pct"))
-            our_eff = main_row["efficiency_pct"]
-            hq_yd = safe_float(hq_match.get("벌당_요척_yd"))
-            our_yd = main_row.get("yards_per_garment") or main_row["marker_length_yd"]
-            hq_w_in = safe_float(hq_match.get("원단폭_in"))
-            hq_w_cm = safe_float(hq_match.get("원단폭_cm"))
-
-            rows_hq = [["항목", "본사", "앱(sparrow)", "차이"]]
-            rows_hq.append(["품번", str(hq_match.get("품번", "—")), context.get("style") or "—", "—"])
-            if hq_eff > 0:
-                rows_hq.append(["효율(%)", round(hq_eff, 2), round(our_eff, 2),
-                                f"{our_eff - hq_eff:+.2f}p" + (" ✓" if our_eff >= hq_eff else " ⚠️")])
-            else:
-                rows_hq.append(["효율(%)", "—", round(our_eff, 2), "—"])
-            if hq_yd > 0:
-                rows_hq.append(["1벌당 요척(yd)", round(hq_yd, 3), round(our_yd, 3),
-                                f"{our_yd - hq_yd:+.3f}"])
-            else:
-                rows_hq.append(["1벌당 요척(yd)", "—", round(our_yd, 3), "—"])
-            rows_hq.append(["원단폭(in)", round(hq_w_in, 0) if hq_w_in > 0 else "—", "—", "—"])
-            rows_hq.append(["원단폭(cm)", round(hq_w_cm, 0) if hq_w_cm > 0 else "—", "—", "—"])
-            rows_hq.append(["사이즈비율", str(hq_match.get("사이즈비율") or "—"), "—", "—"])
-            rows_hq.append(["LOSS여부", str(hq_match.get("LOSS여부") or "—"), "—", "—"])
-            rows_hq.append(["출처", str(hq_match.get("출처") or "—"), "—", "—"])
-
-            for row in rows_hq:
-                ws_hq.append(row)
-            _style_header(ws_hq, 1)
-            for row_idx in range(2, ws_hq.max_row + 1):
-                for cell in ws_hq[row_idx]:
-                    cell.border = border
-                    cell.alignment = Alignment(horizontal="center")
-        _autosize(ws_hq)
-
-    # ─────────── 시트 3+: 재질별 상세 ───────────
+    made = 0
     for mat in materials_ordered:
         res = by_material.get(mat)
         row_meta = next((r for r in summary_rows if r["material"] == mat), None)
         if res is None or row_meta is None:
             continue
-        ws_mat = wb.create_sheet(mat[:30])  # 시트명 31자 제한
-        # 메타 영역 (라벨 통일)
-        n_pat = row_meta["pieces_count"]; n_mir = row_meta["mirror_count"]
-        tg = row_meta.get("total_garments", 1)
-        per_garment = n_pat + n_mir
-        n_total = per_garment * (tg if tg > 1 else 1)
-        meta_rows = [
-            ["원단 폭", f"{row_meta['fabric_width_cm']:.0f} cm"],
-            ["마카 길이", f"{row_meta['marker_length_cm']:.1f} cm  ({row_meta['marker_length_yd']:.3f} yd)"],
-            ["효율", f"{row_meta['efficiency_pct']:.2f} %"],
-            ["패턴 갯수 (1벌당)", f"{n_pat} 개"],
-            ["마카 갯수 (전체)", f"{n_total} 개"],
-            ["마카 벌수", f"{tg} 벌 (다중)" if tg > 1 else "1 벌 (단일)"],
-        ]
-        if tg > 1:
-            meta_rows.append(["1벌당 마카 길이",
-                              f"{row_meta.get('cm_per_garment', 0):.1f} cm  ({row_meta.get('yards_per_garment', 0):.3f} yd)"])
-        meta_rows.extend([
-            ["배치 실패", str(len(res.get("unplaced", [])))],
-            ["처리 시간", f"{row_meta.get('runtime_actual_sec', 0):.1f} 초"],
-            ["엔진 경고", str(len(res.get("warnings", [])))],
-        ])
-        for k, v in meta_rows:
-            ws_mat.append([k, v])
-            ws_mat.cell(ws_mat.max_row, 1).font = sub_font
-            ws_mat.cell(ws_mat.max_row, 1).fill = sub_fill
-        ws_mat.append([])
 
-        # placements 표
-        ws_mat.append(["피스 ID", "이름", "kind", "x_cm", "y_cm",
-                       "bbox_w_cm", "bbox_h_cm", "회전(deg)"])
-        plc_hdr = ws_mat.max_row
-        _style_header(ws_mat, plc_hdr)
-        for pl in res.get("placements", []):
-            ws_mat.append([
-                pl.get("piece_id", ""), pl.get("piece_name", ""),
-                pl.get("kind", ""), round(pl.get("x_cm", 0), 2),
-                round(pl.get("y_cm", 0), 2), round(pl.get("bbox_w_cm", 0), 2),
-                round(pl.get("bbox_h_cm", 0), 2), round(pl.get("rotation_applied_deg", 0), 1),
-            ])
-        for row_idx in range(plc_hdr + 1, ws_mat.max_row + 1):
-            for cell in ws_mat[row_idx]:
-                cell.border = border
-        _autosize(ws_mat)
+        code = _EXCEL_INFERRED_TO_CODE.get(mat, mat)
+        sheet_name = code[:31]
+        # 시트명 중복 방지 (동일 코드 미매핑 재질 등).
+        base = sheet_name
+        dup = 1
+        while sheet_name in wb.sheetnames:
+            dup += 1
+            sheet_name = f"{base[:28]}_{dup}"
+        ws = wb.create_sheet(sheet_name)
+
+        # 요척 산출 필드값 계산 (프로그램 자동 산출 — raw 데이터 기반).
+        fw = row_meta["fabric_width_cm"]
+        ml_cm = row_meta["marker_length_cm"]
+        ml_yd = row_meta["marker_length_yd"]
+        eff = row_meta["efficiency_pct"]
+        n_placed = len(res.get("placements", []))
+        n_unplaced = len(res.get("unplaced", []))
+        n_all = n_placed + n_unplaced
+        used_area_m2 = (fw * ml_cm * eff / 100.0) / 10000.0   # 조각 실면적 (효율×원단면적)
+        yd_per = row_meta.get("yards_per_garment") or ml_yd
+        # 로스 반영 (loss_pct=0 이면 base 와 동일).
+        loss_factor = 1.0 + loss_pct / 100.0
+        len_loss_cm = ml_cm * loss_factor
+        len_loss_yd = ml_yd * loss_factor
+        eff_loss = eff / loss_factor if loss_factor else eff
+        yochuk_loss_yd = yd_per * loss_factor
+
+        # ── 헤더 ──
+        ws["A1"] = "MUSINSA STANDARD · 요척"
+        ws["A1"].font = brand_font
+        ws["A2"] = str(style_label)
+        ws["A2"].font = title_font
+        ws["A3"] = f"● {code} ({mat})"
+        ws["A3"].font = tag_font
+        r = 5
+
+        # ── 요척 상세 (10 필드 — 자동 산출만) ──
+        detail = [
+            ["원단 폭", f"{fw:.0f} cm"],
+            ["마카 길이 (원단 소요 길이)", f"{ml_cm:.1f} cm  ({ml_yd:.3f} yd)"],
+            ["원단별 조각 수 (사용 / 전체)", f"{n_placed} / {n_all}"],
+            ["원단 효율", f"{eff:.2f} %"],
+            ["전체 면적", f"{used_area_m2:.2f} sq m"],
+            ["무늬 간격 (해당시)", "-"],
+            ["로스 %", f"{loss_pct:.2f} %"],
+            ["길이 (로스 반영)", f"{len_loss_cm:.1f} cm  ({len_loss_yd:.3f} yd)"],
+            ["원단 효율 (로스 반영)", f"{eff_loss:.2f} %"],
+            ["요척 (로스 반영)", f"{yochuk_loss_yd:.4f} yd"],
+        ]
+        for k, v in detail:
+            ws.cell(r, 1, k).font = label_font
+            ws.cell(r, 1).fill = label_fill
+            ws.cell(r, 1).border = border
+            ws.cell(r, 2, v).border = border
+            r += 1
+
+        # ── 사이즈 갯수/비율 (오렌지 강조) ──
+        r += 1
+        ws.cell(r, 1, "사이즈 갯수 / 비율").font = size_font
+        ws.cell(r, 1).fill = size_fill
+        ws.cell(r, 1).border = border
+        ws.cell(r, 2, _size_ratio_disp(row_meta)).font = size_font
+        ws.cell(r, 2).fill = size_fill
+        ws.cell(r, 2).border = border
+        r += 2
+
+        # ── 마카 배치도 ──
+        ws.cell(r, 1, "▎ 마카 배치도").font = section_font
+        img_row = r + 1
+        img = _excel_marker_image(res)
+        if img is not None:
+            ws.add_image(img, f"A{img_row}")
+        else:
+            ws.cell(img_row, 1, "(배치도 이미지 없음)").font = brand_font
+
+        # 열 폭 + 페이지 세팅 (A4 가로, 1페이지 fit).
+        ws.column_dimensions["A"].width = 30
+        ws.column_dimensions["B"].width = 46
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A4
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 1
+        ws.page_margins.left = ws.page_margins.right = 0.3
+        ws.page_margins.top = ws.page_margins.bottom = 0.3
+        made += 1
+
+    # 사용된 재질이 하나도 없으면 안내 시트 1개 (빈 워크북 방지).
+    if made == 0:
+        ws = wb.create_sheet("요척")
+        ws["A1"] = "계산된 재질이 없습니다."
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -4072,6 +4130,108 @@ def render_pp_vs_main_tab() -> None:
             f"조각 평균 면적 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
             f"(매칭 {len(result['matched_pairs'])}쌍)"
         )
+
+    # ── 다운로드 (PDF / Excel) — Task #38, 화면 스코프(선택 원단) 그대로 ────
+    st.markdown("#### 결과 다운로드")
+
+    def _sev_of(vd, key):
+        return vd[key]["severity"] if vd else None
+
+    # 조각별 상세 pairs 구성 (매칭 + 미매칭 — 화면 스코프).
+    axis_pairs: list[dict] = []
+    for m in shown_pairs:
+        vd = _pair_verdict(m)
+        axis_pairs.append({
+            "block_name": _piece_label(m),
+            "material": pair_material_code(m) or material_filter,
+            "pp_area": m.get("pp_area"),
+            "main_area": m.get("main_area"),
+            "width_exp": m.get("width_expansion_pct"),
+            "height_exp": m.get("height_expansion_pct"),
+            "area_exp": m.get("expansion_pct"),
+            "width_sev": _sev_of(vd, "width"),
+            "height_sev": _sev_of(vd, "height"),
+            "reasons": vd["reasons"] if vd else [],
+            "pp_coords": (m.get("pp_piece") or {}).get("coords_cm"),
+            "main_coords": (m.get("main_piece") or {}).get("coords_cm"),
+            "matched": True,
+        })
+    for u in shown_unmatched_pp:
+        axis_pairs.append({
+            "block_name": (u["block_name"] or "(무명)") + " (PP만)",
+            "material": material_filter, "pp_area": u.get("area"), "main_area": None,
+            "width_exp": None, "height_exp": None, "area_exp": None,
+            "width_sev": None, "height_sev": None, "reasons": [],
+            "pp_coords": (u.get("piece") or {}).get("coords_cm"), "main_coords": None,
+            "matched": False,
+        })
+    for u in shown_unmatched_main:
+        axis_pairs.append({
+            "block_name": (u["block_name"] or "(무명)") + " (메인만)",
+            "material": material_filter, "pp_area": None, "main_area": u.get("area"),
+            "width_exp": None, "height_exp": None, "area_exp": None,
+            "width_sev": None, "height_sev": None, "reasons": [],
+            "pp_coords": None, "main_coords": (u.get("piece") or {}).get("coords_cm"),
+            "matched": False,
+        })
+
+    worst_sev = "ok"
+    _rank = {"ok": 0, "warning": 1, "critical": 2}
+    for p in axis_pairs:
+        for s in (p["width_sev"], p["height_sev"]):
+            if s and _rank.get(s, 0) > _rank[worst_sev]:
+                worst_sev = s
+
+    style_label = (pp_parsed.get("style") or main_parsed.get("style")
+                   or pp_parsed.get("file_name") or "STYLE")
+    now = datetime.now()
+    axis_ctx = {
+        "style": style_label,
+        "file_name_pp": pp_parsed.get("file_name") or "-",
+        "file_name_main": main_parsed.get("file_name") or "-",
+        "target_size": target_size,
+        "material": material_filter,
+        "generated_at": now.strftime("%Y-%m-%d %H:%M"),
+        "declared": axis_declarations.get(material_filter, {"vertical": 0.0, "horizontal": 0.0}),
+        "scoped_pp_total": scoped_pp_total,
+        "scoped_main_total": scoped_main_total,
+        "scoped_exp": scoped_exp,
+        "n_warn": n_warn,
+        "n_crit": n_crit,
+        "material_summary": [{
+            "material": material_filter,
+            "n_pieces": len(shown_pairs),
+            "n_warn": n_warn,
+            "n_crit": n_crit,
+            "worst_sev": worst_sev,
+        }],
+        "pairs": axis_pairs,
+    }
+
+    fname_base = f"{str(style_label).replace(' ', '_')}_{target_size}_{now.strftime('%Y%m%d_%H%M')}"
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        try:
+            pdf_bytes = build_axis_pdf(axis_ctx)
+            st.download_button(
+                "📄 PDF 리포트 다운로드", data=pdf_bytes,
+                file_name=f"axis_report_{fname_base}.pdf",
+                mime="application/pdf", use_container_width=True,
+                key="axis_dl_pdf",
+            )
+        except Exception as e:
+            st.warning(f"PDF 생성 실패: {e}")
+    with dc2:
+        try:
+            xlsx_bytes = build_axis_xlsx(axis_ctx)
+            st.download_button(
+                "📊 Excel 데이터 다운로드", data=xlsx_bytes,
+                file_name=f"axis_data_{fname_base}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="axis_dl_xlsx",
+            )
+        except Exception as e:
+            st.warning(f"Excel 생성 실패: {e}")
 
 
 def main() -> None:
