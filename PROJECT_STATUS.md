@@ -1,7 +1,7 @@
 # 원단 요척 산출 시스템 — 프로젝트 상태
 
 > **단일 진실 공급원 (SSOT)**. 변동 사항만 갱신. 안정 컨텍스트는 `CLAUDE.md` 참조.
-> 마지막 갱신: **2026-05-10** (식서 가로 통일 + 마카 갯수 placements 라벨 정정 — 사장님 시각 검증 ✅)
+> 마지막 갱신: **2026-07-24** (Task #38-f 종료 — 축율 판정 fix + BLK_5_1 raw bbox 유지 결정 · Task #38-g 식서 축 측정 발제)
 
 ---
 
@@ -59,7 +59,23 @@
 
 ---
 
-## 3. 현재 진행 (2026-05-10)
+## 3. 현재 진행 (2026-07-24)
+
+### 3.-1. Task #35~#38 완료 — 축율 검증 + 다운로드 재구성 (2026-07-15~24) ⭐
+
+**Task #35** 도형 유사도 매칭 (크기 순 fallback 폐기, `SHAPE_MATCH_THRESHOLD 0.85`) `d406f7e`
+**Task #36~37** 원단별 축율 검증 (`axis_verdict.py` `INDUSTRY_MAX_AXIS_PCT 5.0`, verdict_pair, 원단 선택 스코프) `cfe808e`
+**Task #38 (b~e)** 요척 PDF/Excel 재구성 `9ded99a`:
+- `svg_render.py` 신규 — sparrow 원본 SVG → PDF/Excel 임베드 (matplotlib 재렌더 폐기), **cairosvg** + 한글 폰트 런타임 주입(`resolve_korean_family` fc-match)
+- v33 PDF 정리 (사이즈 통합·엔진 삭제·합계행 삭제·[상세→배치도] 세트)
+- v33 Excel 원단별 시트 재작성 (요척 10필드 + 사이즈비율 + 배치도, 협력사/축율/코멘트 삭제, A4 가로)
+- 배치도 고정 영역 max-fit (PDF 515×340pt · Excel 720×400px) → 원단 무관 레이아웃 통일
+- **배포 시**: Streamlit Cloud `packages.txt` 에 `libcairo2` + `fonts-nanum`(또는 `fonts-noto-cjk`) 필요 (Task #30 확장에서 처리)
+
+**Task #38-f** 축율 판정 raw 검증 (2026-07-24 종료):
+- **[A] BLK_7_1 판정 정밀도 fix** `bb666d5` — `round(actual,1) > round(declared,1)`. 실측 <0.05%(화면 "+0.0%")가 신고초과로 오판되던 버그 해결. tests +5 / 353 passed.
+- **[B] BLK_5_1 +0.2% 가로 = raw bbox 유지 (수정 X)** — 실측 dump: pp(QC) w=19.8374 / main(PP) w=19.8752, 극점 x_max 0.38mm 차 (정점 31→36 샘플링). 회전 아님(x_min=3.000 동일), 오매칭 아님(block_name), 조각은 실질 축소(면적 -0.3%·세로 -3.3%). **원칙 #1 raw 우선 → 유지, 정보 제공용 표시**.
+- 후속: **Task #38-g** 식서 축 기준 치수 측정 발제 (§5.4).
 
 ### 3.0. 식서 가로 통일 + 마카 갯수 placements 라벨 정정 (2026-05-10) ⭐
 
@@ -173,8 +189,15 @@
 ### 5.3. 장기 (Phase 2-B-7)
 
 - Linux x86_64 sparrow cross-compile (GitHub Actions)
-- Streamlit Cloud 배포
+- Streamlit Cloud 배포 (packages.txt: `libcairo2` + `fonts-nanum`/`fonts-noto-cjk` — Task #38 cairosvg/한글 폰트 대응)
 - 사내 도메인 연결
+
+### 5.4. Task #38-g 발제 — 식서(grain) 축 기준 치수 측정 (설계/승인 대기)
+
+- **배경**: Task #38-f [B] — raw bbox 는 곡선 조각의 단일 극점(x_max 0.38mm)에 민감 → 조각이 실질 축소해도 가로 확대율이 +0.2% 로 뜰 수 있음 (BLK_5_1 실측).
+- **개선 A (사장님 채택 방향)**: bbox 극점 대신 **식서 축 기준 폭/길이** 측정 → 정점 샘플링/극점 민감성 근본 해결.
+- **본질 정렬**: 사장님 본질 #1 "식서 = 요척 핵심". `grain_extractor.py` 활용.
+- **절대 준수**: 별도 설계 + 회귀 테스트 + 사장님 승인 후 착수. Task #35~#38 로직 무손상. raw bbox 방식은 `_piece_bbox` 그대로 두고 신규 경로로 분리 검토.
 
 ---
 
@@ -192,14 +215,13 @@
 
 | commit | 날짜 | 결정 |
 |--------|------|------|
+| (문서 commit) | 2026-07-24 | Task #38-f [B] BLK_5_1 raw bbox 유지 (곡선 극점 0.38mm·실질 축소) + Task #38-g 식서 축 측정 발제 |
+| `bb666d5` | 2026-07-23 | Task #38-f [A] 축율 판정 정밀도 fix (round 비교 · 화면 "+0.0%"↔판정 일치) |
+| `9ded99a` | 2026-07-23 | Task #38 (b~e) 요척 PDF/Excel 재구성 (SVG 임베드·한글 폰트·원단별 시트·레이아웃 통일) |
+| `cfe808e` | 2026-07-15 | Task #36-37 원단별 축율 검증 (5% 상한 · 원단 선택 스코프) |
+| `d406f7e` | 2026-07-15 | Task #35 도형 유사도 매칭 (크기 순 fallback 폐기 · 임계 0.85) |
 | (다음 commit) | 2026-05-10 | 식서 가로 통일 + 마카 갯수 placements 라벨 정정 (사장님 시각 검증 ✅) |
 | `9f0df8a` | 2026-05-07 | PROJECT_STATUS #36 박제 + 단위 명시 |
-| `e9273fc` | 2026-05-07 | sparrow runtime + n_lay audit |
-| `d88db25` | 2026-05-07 | 30 DXF sweep (보정 후 갭 97.5% 해소) |
-| `b16a177` | 2026-05-07 | 사양서 §9 신설 (50cm × 50cm 박스 필수) |
-| `2bbefc3` | 2026-05-07 | 50cm × 50cm 박스 자동 보정 (옵션 A) |
-| `0e0b490` | 2026-05-07 | PATTERN_PREP_GUIDE v2.0 정식 승격 |
-| `fdaf523` | 2026-05-07 | tests/ 폴더 + ROOT 경로 갱신 |
 
 전체 결정 history: `docs/history/feedback/feedback_2026-04.md` + `feedback_2026-05.md`.
 
