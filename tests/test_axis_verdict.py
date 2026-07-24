@@ -64,6 +64,26 @@ class TestVerdictSingle(unittest.TestCase):
         v = verdict_single(-1.0, 0.0, "세로")
         self.assertEqual(v["severity"], "ok")
 
+    # ── Task #38-f: BLK_7_1 정밀도 불일치 버그 회귀 가드 (round 비교) ──
+    def test_blk7_float_residual_is_ok(self):
+        """bbox 부동소수점 잔여(~1e-13, 표시 '+0.0%') → 정상 (기존 strict > 는 신고초과 버그)."""
+        v = verdict_single(9.47e-14, 0.0, "가로")
+        self.assertEqual(v["severity"], "ok")
+
+    def test_sub_display_growth_is_ok(self):
+        """실측 0.03%(화면 '+0.0%') vs 신고 0.0% → 정상 (화면과 판정 일치)."""
+        self.assertEqual(verdict_single(0.03, 0.0, "가로")["severity"], "ok")
+        self.assertEqual(verdict_single(0.049, 0.0, "세로")["severity"], "ok")
+
+    def test_rounds_to_tenth_boundary(self):
+        """0.05%(화면 '+0.1%')부터는 신고초과 (반올림 경계 — 화면과 일치)."""
+        self.assertEqual(verdict_single(0.05, 0.0, "가로")["severity"], "warning")
+        self.assertEqual(verdict_single(0.04, 0.0, "가로")["severity"], "ok")
+
+    def test_blk5_visible_growth_still_warning(self):
+        """실측 +0.2%(화면 표시값) vs 신고 0.0% → 신고초과 유지 (표시되는 성장은 판정)."""
+        self.assertEqual(verdict_single(0.2, 0.0, "가로")["severity"], "warning")
+
     def test_reason_present(self):
         """모든 판정에 사유 문자열 포함 (사장님 확정 — 사유 알림)."""
         for actual, declared in [(2.5, 3.0), (3.5, 3.0), (5.5, 5.0)]:

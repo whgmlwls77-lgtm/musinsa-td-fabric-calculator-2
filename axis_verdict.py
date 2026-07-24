@@ -3,12 +3,16 @@
 협력사 신고 축율(원단별 세로/가로 %) 대비 시스템 실측 확대율(bbox 기반)을
 대조해 판정한다. 순수 계산만 담당 (streamlit 의존성 없음 — 단위 테스트 가능).
 
-판정 규칙 (오차 범위 없음 — 사장님 원칙 #1 추측 금지):
-  - ✅ ok       : 실측 ≤ 신고             (정상)
-  - ⚠️ warning  : 실측 > 신고             (신고 초과 — 협력사 신고 대비 큼)
-  - 🚨 critical : 실측 > 5% (INDUSTRY_MAX) (실무 물리적 상한 초과 — 신고 무관)
+판정 규칙 (소수 첫째자리 반올림 비교 — 화면 표시(:+.1f)와 판정 일치):
+  - ✅ ok       : round(실측,1) ≤ round(신고,1)   (정상)
+  - ⚠️ warning  : round(실측,1) > round(신고,1)    (신고 초과 — 협력사 신고 대비 큼)
+  - 🚨 critical : round(실측,1) > 5% (INDUSTRY_MAX) (실무 물리적 상한 초과 — 신고 무관)
 
 우선순위: 5% 상한(critical) > 신고 초과(warning) > 정상(ok).
+
+Task #38-f (사장님 확정 2026-07-23): 표시/판정 정밀도 불일치 버그 수정.
+  실측 0.05% 미만은 화면에 "+0.0%"로 표시되는데 기존 strict > 는 신고초과(0.0)로
+  오판했음 → 반올림 비교로 화면과 일치. 사장님 지시 "실측 0%면 정상" 부합.
 경고 사유(reason) 함께 반환 — 사장님 확정 (2026-07-15): 사장님이 왜 위반인지 확인.
 """
 from __future__ import annotations
@@ -37,13 +41,19 @@ def verdict_single(actual_pct: float, declared_pct: float, direction: str) -> di
         "direction": str,
       }
     """
-    if actual_pct > INDUSTRY_MAX_AXIS_PCT:
+    # Task #38-f (사장님 확정 2026-07-23): 화면 표시(:+.1f)와 판정 정밀도 일치 →
+    # 소수 첫째자리로 반올림해 비교 (실측 0.05% 미만 = "+0.0%" 표시 → 정상 처리).
+    # 예: 실측 0.03%(표시 +0.0%) vs 신고 0.0% → 기존 strict > 는 신고초과(버그) →
+    #     round(0.0,1) > round(0.0,1) = False → 정상.
+    actual_r = round(actual_pct, 1)
+    declared_r = round(declared_pct, 1)
+    if actual_r > round(INDUSTRY_MAX_AXIS_PCT, 1):
         label, severity = "🚨", "critical"
         reason = (
             f"{direction} 축율 {actual_pct:.1f}% 초과 — 실무 물리적 상한 "
             f"{INDUSTRY_MAX_AXIS_PCT:.0f}% 넘음. 패턴에서 반영 불가."
         )
-    elif actual_pct > declared_pct:
+    elif actual_r > declared_r:
         label, severity = "⚠️", "warning"
         reason = (
             f"{direction} 축율 {actual_pct:.1f}% > 신고 {declared_pct:.1f}% "
