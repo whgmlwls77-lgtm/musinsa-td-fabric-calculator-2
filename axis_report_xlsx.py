@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 
 _HEADER_FILL = PatternFill("solid", fgColor="F1F5F9")
@@ -91,31 +92,68 @@ def build_axis_xlsx(context: dict) -> bytes:
     for col, w in zip("ABCDE", (14, 10, 12, 12, 12)):
         ws2.column_dimensions[col].width = w
 
-    # ── Sheet 3: 조각별 상세 ───────────────────────────────────
+    # ── Sheet 3: 조각별 상세 (면적 우선 판정 + 4변 근거 + 정합성 — 재설계 2026-07-26) ──
     ws3 = wb.create_sheet("조각별상세")
-    ws3.append(["블록명", "원단", "PP 면적(cm²)", "메인 면적(cm²)",
-                "가로 확대율(%)", "세로 확대율(%)", "면적 확대율(%)", "판정", "사유"])
+    ws3.append(["조각명", "원단", "판정", "PP 면적(mm²)", "메인 면적(mm²)", "면적%",
+                "세로%", "가로%", "정합성", "좌변%", "우변%", "상변%", "하변%", "대칭성"])
     for p in (context.get("pairs") or []):
-        worst = _worst(p.get("width_sev"), p.get("height_sev"))
-        reasons = "; ".join(p.get("reasons") or [])
+        sev = p.get("verdict_severity")
+        edges = p.get("edges") or {}
+
+        def _edge_pct(key):
+            tpl = edges.get(key)
+            return _num(tpl[2]) if tpl else ""
         ws3.append([
             p.get("block_name") or "(무명)",
             p.get("material") or "-",
-            _num(p.get("pp_area")),
-            _num(p.get("main_area")),
-            _num(p.get("width_exp")),
-            _num(p.get("height_exp")),
+            _SEV_WORD.get(sev, "-") if sev else "-",
+            _num(p.get("pp_area_mm2")),
+            _num(p.get("main_area_mm2")),
             _num(p.get("area_exp")),
-            _SEV_WORD.get(worst, "-") if worst else "-",
-            reasons,
+            _num(p.get("v_actual")),
+            _num(p.get("h_actual")),
+            "이상" if p.get("consistency_flag") else "정합",
+            _edge_pct("left"), _edge_pct("right"), _edge_pct("top"), _edge_pct("bottom"),
+            "; ".join(p.get("symmetry") or []),
         ])
         last = ws3.max_row
-        if worst in _SEV_FILL:
-            ws3.cell(row=last, column=8).fill = _SEV_FILL[worst]
-    _style_header(ws3, 9)
-    for col, w in zip("ABCDEFGHI", (16, 12, 14, 14, 14, 14, 14, 10, 40)):
+        if sev in _SEV_FILL:
+            ws3.cell(row=last, column=3).fill = _SEV_FILL[sev]
+    _style_header(ws3, 14)
+    for col, w in zip("ABCDEFGHIJKLMN",
+                      (16, 10, 8, 13, 13, 8, 8, 8, 8, 8, 8, 8, 8, 24)):
         ws3.column_dimensions[col].width = w
+
+    # ── Sheet 4: 오버랩 이미지 (조각별 · 원 방향 — 사장님 지시 2026-07-26) ──
+    ws4 = wb.create_sheet("오버랩이미지")
+    ws4.append(["조각명", "판정", "QC(파랑) vs PP(빨강) 오버랩"])
+    _style_header(ws4, 3)
+    ws4.column_dimensions["A"].width = 16
+    ws4.column_dimensions["B"].width = 8
+    ws4.column_dimensions["C"].width = 40
+    anchor_row = 2
+    for p in (context.get("pairs") or []):
+        png = p.get("overlap_png")
+        ws4.cell(row=anchor_row, column=1, value=p.get("block_name") or "(무명)")
+        ws4.cell(row=anchor_row, column=2,
+                 value=_SEV_WORD.get(p.get("verdict_severity"), "-"))
+        if png:
+            try:
+                img = XLImage(io.BytesIO(png))
+                fw, fh = _fit(img.width, img.height, 300.0, 220.0)
+                img.width, img.height = fw, fh
+                ws4.add_image(img, f"C{anchor_row}")
+            except Exception:
+                ws4.cell(row=anchor_row, column=3, value="(이미지 생성 실패)")
+        else:
+            ws4.cell(row=anchor_row, column=3, value="(이미지 없음)")
+        anchor_row += 12   # 이미지 높이만큼 행 간격
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _fit(w, h, max_w, max_h):
+    ratio = min(max_w / w, max_h / h, 1.0)
+    return w * ratio, h * ratio

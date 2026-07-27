@@ -29,7 +29,11 @@ from pp_vs_main_compare import (
     compare_pp_vs_main,
     filter_pairs_by_material,
     pair_material_code,
+    CONF_NAME_SHAPE,
+    CONF_SHAPE,
+    CONF_SUSPECT,
     SHAPE_MATCH_THRESHOLD,
+    SHAPE_SUSPECT_MIN,
 )
 
 
@@ -210,6 +214,42 @@ class TestMatching(unittest.TestCase):
         pairs = {(m["block_name_pp"], m["block_name_main"]) for m in r["matched_pairs"]}
         # 도형 기준: P1(앞판)↔M2(앞판), P2(사각)↔M1(사각).
         self.assertEqual(pairs, {("P1", "M2"), ("P2", "M1")})
+
+
+class TestMatchConfidence(unittest.TestCase):
+    """Task #38-g 지적 1 — 이름 매칭 후 도형 유사도 게이트 + 신뢰도 배지."""
+
+    def test_name_shape_high_confidence(self):
+        """이름 동일 + 도형 동일(sim=1.0) → ✅ 이름+도형 (name_shape)."""
+        pp = [_piece("FB", "32", 100.0, coords_cm=PIECE_COORDS)]
+        main = [_piece("FB", "32", 103.0, coords_cm=PIECE_COORDS)]
+        m = compare_pp_vs_main(pp, main, "32")["matched_pairs"][0]
+        self.assertEqual(m["confidence"], CONF_NAME_SHAPE)
+        self.assertGreaterEqual(m["similarity_score"], SHAPE_MATCH_THRESHOLD)
+
+    def test_name_suspect_mid_similarity(self):
+        """이름 동일 + 도형 애매(앞판 vs 사각 0.5064) → ⚠️ 의심 (suspect)."""
+        pp = [_piece("FB", "32", 100.0, coords_cm=PIECE_COORDS)]
+        main = [_piece("FB", "32", 104.0, coords_cm=SQUARE_COORDS)]
+        m = compare_pp_vs_main(pp, main, "32")["matched_pairs"][0]
+        self.assertEqual(m["confidence"], CONF_SUSPECT)
+        self.assertGreaterEqual(m["similarity_score"], SHAPE_SUSPECT_MIN)
+        self.assertLess(m["similarity_score"], SHAPE_MATCH_THRESHOLD)
+
+    def test_shape_rematch_confidence(self):
+        """이름 다름 + 도형 유사 → 🔷 도형 재매칭 (shape)."""
+        pp = [_piece("LTH", "32", 100.0, coords_cm=PIECE_COORDS)]
+        main = [_piece("CAPS", "32", 105.0, coords_cm=_scaled(PIECE_COORDS, 1.02))]
+        m = compare_pp_vs_main(pp, main, "32")["matched_pairs"][0]
+        self.assertEqual(m["confidence"], CONF_SHAPE)
+
+    def test_name_no_coords_trusts_name(self):
+        """좌표 부재 → 도형 검증 불가 → 이름 신뢰 (하위호환, name_shape · sim None)."""
+        pp = [_piece("FB", "32", 100.0)]   # coords_cm=None
+        main = [_piece("FB", "32", 103.0)]
+        m = compare_pp_vs_main(pp, main, "32")["matched_pairs"][0]
+        self.assertEqual(m["confidence"], CONF_NAME_SHAPE)
+        self.assertIsNone(m["similarity_score"])
 
 
 class TestSizeMismatch(unittest.TestCase):

@@ -85,7 +85,8 @@ from pp_vs_main_compare import (
     MATERIAL_CODE_TO_INFERRED,
     SHAPE_MATCH_THRESHOLD,
 )
-from axis_verdict import verdict_pair, INDUSTRY_MAX_AXIS_PCT
+from axis_verdict import verdict_pair, verdict_from_measures, INDUSTRY_MAX_AXIS_PCT
+from corner_extractor import measure_piece
 from axis_report_pdf import build_axis_pdf
 from axis_report_xlsx import build_axis_xlsx
 from svg_render import svg_to_png
@@ -3793,6 +3794,107 @@ def _axul_thumb_html(piece_ref: dict | None, size_px: int = 120) -> str:
     )
 
 
+def _axul_overlap_png(pp_coords, main_coords, cr: dict,
+                      main_measure: dict | None = None,
+                      scale: float = 1.0) -> bytes | None:
+    """QC(파랑) vs PP(빨강) 오버랩 PNG + 측정 변 라인 (사장님 지시 2026-07-26).
+
+    회전 없음 · 원점 정렬(min→0)만 → 조각 자연 형태 유지 (오비단=가로 벨트, 앞판=세로 기장).
+    측정 4변(main 코너 index → raw 매핑) dashed 오버레이 (지적 4):
+      좌변/우변 = 파란 dashed (세로 근거) · 상변/하변 = 초록 dashed (가로 근거) · % 라벨.
+    scale(0~1, 사장님 지시 2026-07-27) = 조각 최대치수/전체 최대치수 → figsize 비례
+      (조각 실제 크기 비교 가능 · 뒤판 크게 오비단 작게). 라벨 ASCII (tofu 회피).
+    """
+    def _origin(coords):
+        if not coords or len(coords) < 3:
+            return None
+        xs = [float(p[0]) for p in coords]
+        ys = [float(p[1]) for p in coords]
+        return [(x - min(xs), y - min(ys)) for x, y in zip(xs, ys)]
+
+    ap = _origin(pp_coords)
+    am = _origin(main_coords)
+    if ap is None or am is None:
+        return None
+    try:
+        # figsize = 조각 bbox 종횡비 × scale (최장변 base 4in 기준).
+        axs = [p[0] for p in am]; ays = [p[1] for p in am]
+        w = max(axs) - min(axs); h = max(ays) - min(ays)
+        long_dim = max(w, h, 1e-6); short_dim = max(min(w, h), 1e-6)
+        s = max(0.15, min(1.0, scale))   # 너무 작아 안 보이는 것 방지 (하한 0.15)
+        base = 4.2
+        fig_long = base * s
+        fig_short = max(1.2, fig_long * (short_dim / long_dim))
+        figsize = (fig_long, fig_short) if w >= h else (fig_short, fig_long)
+        fig, ax = plt.subplots(figsize=figsize)
+        for coords, color, lab in [(ap, "#2563eb", "QC (PP slot)"),
+                                   (am, "#dc2626", "PP (Main slot)")]:
+            xs = [p[0] for p in coords] + [coords[0][0]]
+            ys = [p[1] for p in coords] + [coords[0][1]]
+            ax.plot(xs, ys, color=color, lw=1.4, alpha=0.75, label=lab)
+
+        # 정중앙 세로/가로 십자선 (주황 dashed · main raw centroid — 사장님 지시 2026-07-27).
+        try:
+            from shapely.geometry import Polygon as _SP
+            _c = _SP(am).centroid
+            axs = [p[0] for p in am]; ays = [p[1] for p in am]
+            ax.plot([_c.x, _c.x], [min(ays), max(ays)], color="#ea580c", lw=1.2,
+                    ls=":", alpha=0.85)
+            ax.plot([min(axs), max(axs)], [_c.y, _c.y], color="#ea580c", lw=1.2,
+                    ls=":", alpha=0.85)
+        except Exception:
+            pass
+
+        ee = cr.get("edges_expansion") or {}
+        idx = (main_measure or {}).get("corner_indices")
+        # 측정 4변 라인 (main raw 좌표에 매핑 · 원점 정렬 am 사용).
+        if idx and len(am) == len(main_coords):
+            pt = {k: am[idx[k]] for k in ("LT", "RT", "LB", "RB") if idx.get(k) is not None}
+            edge_defs = [
+                ("LT", "LB", "#1d4ed8", "L", ee.get("left")),    # 좌변 (세로)
+                ("RT", "RB", "#1d4ed8", "R", ee.get("right")),   # 우변 (세로)
+                ("LT", "RT", "#059669", "T", ee.get("top")),     # 상변 (가로)
+                ("LB", "RB", "#059669", "B", ee.get("bottom")),  # 하변 (가로)
+            ]
+            for a, b, color, tag, exp in edge_defs:
+                if a in pt and b in pt:
+                    (x0, y0), (x1, y1) = pt[a], pt[b]
+                    ax.plot([x0, x1], [y0, y1], color=color, lw=1.8, ls="--", alpha=0.9)
+                    txt = f"{tag} {exp:+.1f}%" if exp is not None else tag
+                    ax.annotate(txt, ((x0 + x1) / 2, (y0 + y1) / 2), fontsize=7,
+                                color=color, fontweight="bold",
+                                ha="center", va="center",
+                                bbox=dict(boxstyle="round,pad=0.1", fc="white",
+                                          ec="none", alpha=0.7))
+            for p in pt.values():
+                ax.plot(p[0], p[1], "o", color="#111827", ms=4)
+
+        ax.set_aspect("equal")
+        ax.legend(fontsize=7, loc="best")
+        ax.set_xlabel("cm", fontsize=7)
+        ax.tick_params(labelsize=6)
+        png = figure_to_png_bytes(fig, dpi=110)
+        plt.close(fig)
+        # 정밀 상한: 최장변 = 400px × scale (조각 실제 크기 비율 · 최대 400px · 사장님 지시).
+        try:
+            from PIL import Image as _PILImage
+            im = _PILImage.open(io.BytesIO(png))
+            target_long = max(80, round(400 * max(0.15, min(1.0, scale))))
+            long_side = max(im.size)
+            if long_side != target_long and long_side > 0:
+                ratio = target_long / long_side
+                im = im.resize((max(1, round(im.size[0] * ratio)),
+                                max(1, round(im.size[1] * ratio))), _PILImage.LANCZOS)
+                out = io.BytesIO()
+                im.save(out, format="PNG")
+                png = out.getvalue()
+        except Exception:
+            pass
+        return png
+    except Exception:
+        return None
+
+
 def _parse_uploaded_dxf(uploaded, label: str) -> dict | None:
     """업로드 파일 → parse_dxf_v3. 실패 시 에러 표시 후 None."""
     if uploaded is None:
@@ -3925,6 +4027,13 @@ def render_pp_vs_main_tab() -> None:
     axis_declarations: dict[str, dict[str, float]] = {
         material_filter: {"vertical": decl_v, "horizontal": decl_h}
     }
+
+    # ── 실행 버튼 (사장님 지시 2026-07-26 — 자동 실행 X · 버튼 클릭 시에만) ──
+    if st.button("▶️ 축율 검증 실행", type="primary", key="pp_vs_main__run"):
+        st.session_state["axis_verify_ran"] = True
+    if not st.session_state.get("axis_verify_ran"):
+        st.info("사이즈·검증 대상 원단·신고 축율 입력 후 **▶️ 축율 검증 실행**을 눌러주세요.")
+        return
     st.markdown("---")
 
     # ── 계산 (전체) ─────────────────────────────────────────────
@@ -3946,52 +4055,74 @@ def render_pp_vs_main_tab() -> None:
     scoped_exp = ((scoped_main_total - scoped_pp_total) / scoped_pp_total * 100.0
                   if scoped_pp_total > 0 else None)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric(f"PP 총면적 ({material_filter})", f"{scoped_pp_total:,.1f} cm²")
-    with c2:
-        st.metric(f"메인 총면적 ({material_filter})", f"{scoped_main_total:,.1f} cm²")
-    with c3:
-        if scoped_exp is None:
-            st.metric(f"면적 확대율 ({material_filter})", "계산 불가")
-        else:
-            st.metric(f"면적 확대율 ({material_filter})", f"{scoped_exp:+.2f} %",
-                      f"기준 사이즈 {target_size} · (메인−PP)/PP")
-
-    def _pair_verdict(m: dict):
-        """매칭 쌍 가로/세로 축율 판정 (해당 원단 신고값 대조). 좌표 없으면 None."""
-        wexp = m.get("width_expansion_pct")
-        hexp = m.get("height_expansion_pct")
-        if wexp is None or hexp is None:
-            return None
-        decl = axis_declarations.get(pair_material_code(m),
-                                     {"vertical": 0.0, "horizontal": 0.0})
-        # 가로 ↔ horizontal, 세로 ↔ vertical.
-        return verdict_pair(wexp, decl["horizontal"], hexp, decl["vertical"])
-
     def _piece_label(m: dict) -> str:
         return (m.get("block_name_pp") or m.get("block_name_main")
                 or m.get("block_name") or "(무명)")
 
-    # ── 경고 사유 알림 (사장님 확정 2026-07-15) ─────────────────
+    def _pct_disp(v):
+        return f"{v:+.1f}%" if v is not None else "—"
+
+    def _fmt_pt(p) -> str:
+        return f"({p[0]:.2f}, {p[1]:.2f})" if p else "—"
+
+    # ── 매칭 쌍별 신규 판정 (면적 우선) — 탭 전체·다운로드 단일 소스 ──
+    # 판정 = 면적 확대율 (verdict_area). 세로/가로/4변 = 근거. 정합성 진단.
+    # 유형(rectangle/curved 등)은 내부 로직 — 사용자 UI 미노출 (사장님 지시 2026-07-26).
+    corner_data = []  # (m, cr, pp_measure, main_measure)
+    for m in shown_pairs:
+        ppp = m.get("pp_piece") or {}
+        mpp = m.get("main_piece") or {}
+        pm = measure_piece(ppp.get("coords_cm"), ppp.get("grain"))
+        mm = measure_piece(mpp.get("coords_cm"), mpp.get("grain"))
+        decl = axis_declarations.get(pair_material_code(m),
+                                     {"vertical": 0.0, "horizontal": 0.0})
+        cr = verdict_from_measures(pm, mm, decl["horizontal"], decl["vertical"],
+                                   area_exp=m.get("expansion_pct"),
+                                   bbox_width_exp=m.get("width_expansion_pct"),
+                                   bbox_height_exp=m.get("height_expansion_pct"))
+        corner_data.append((m, cr, pm, mm))
+
+    # 조각 큰 순 정렬 (실제 면적 내림차순 — 사장님 지시 2026-07-27 · 뒤판 위·오비단 아래).
+    corner_data.sort(key=lambda t: max(t[0].get("pp_area") or 0.0,
+                                       t[0].get("main_area") or 0.0), reverse=True)
+
+    # 전체 조각 최대 치수 (오버랩 이미지 실제 크기 비율 스케일용 — 사장님 지시 2026-07-27).
+    def _piece_max_dim(m: dict) -> float:
+        return max(m.get("pp_width_cm") or 0.0, m.get("pp_height_cm") or 0.0,
+                   m.get("main_width_cm") or 0.0, m.get("main_height_cm") or 0.0, 1e-6)
+    global_max_dim = max((_piece_max_dim(m) for m, _, _, _ in corner_data), default=1e-6)
+
+    # ── 결과 카드 5개 (면적 3 + 평균 세로/가로 — 사장님 확장 2026-07-27) ──
+    def _avg_of(key):
+        vals = [cr[key] for _, cr, _, _ in corner_data if cr.get(key) is not None]
+        return sum(vals) / len(vals) if vals else None
+    avg_v = _avg_of("height_actual")   # 평균 세로 축율
+    avg_h = _avg_of("width_actual")    # 평균 가로 축율
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric(f"PP 총면적 ({material_filter})", f"{scoped_pp_total:,.0f} cm²")
+    c2.metric(f"메인 총면적 ({material_filter})", f"{scoped_main_total:,.0f} cm²")
+    c3.metric("면적 확대율", f"{scoped_exp:+.2f} %" if scoped_exp is not None else "계산 불가")
+    c4.metric("평균 세로 축율", _pct_disp(avg_v) if avg_v is not None else "—",
+              help="모든 매칭 조각 세로 축율 단순 평균 (근거)")
+    c5.metric("평균 가로 축율", _pct_disp(avg_h) if avg_h is not None else "—",
+              help="모든 매칭 조각 가로 축율 단순 평균 (근거)")
+
+    # ── 경고 사유 알림 (면적 판정 기준) ──
     crit_msgs: list[str] = []
     warn_msgs: list[str] = []
     n_warn = n_crit = 0
-    for m in shown_pairs:
-        vd = _pair_verdict(m)
-        if vd is None:
+    for m, cr, pm, mm in corner_data:
+        v = cr["verdict"]
+        if v is None:
             continue
-        if vd["worst_severity"] == "critical":
-            n_crit += 1
-        elif vd["worst_severity"] == "warning":
-            n_warn += 1
-        label = _piece_label(m)
         code = pair_material_code(m) or "?"
-        for dv in (vd["width"], vd["height"]):
-            if dv["severity"] == "critical":
-                crit_msgs.append(f"🚨 {label} ({code}): {dv['reason']}")
-            elif dv["severity"] == "warning":
-                warn_msgs.append(f"⚠️ {label} ({code}): {dv['reason']}")
+        if v["severity"] == "critical":
+            n_crit += 1
+            crit_msgs.append(f"🚨 {_piece_label(m)} ({code}): {v['reason']}")
+        elif v["severity"] == "warning":
+            n_warn += 1
+            warn_msgs.append(f"⚠️ {_piece_label(m)} ({code}): {v['reason']}")
 
     st.markdown("#### 🔎 축율 판정")
     if crit_msgs or warn_msgs:
@@ -3999,189 +4130,180 @@ def render_pp_vs_main_tab() -> None:
             st.error(msg)
         for msg in warn_msgs:
             st.warning(msg)
-    elif shown_pairs:
+    elif corner_data:
         st.success("✅ 신고 축율 이내 — 위반 조각 없음.")
-    st.caption(f"⚠️ 축율 초과: {n_warn}건  /  🚨 상한 초과: {n_crit}건  "
+    st.caption(f"⚠️ 신고 초과: {n_warn}건  /  🚨 상한 초과: {n_crit}건  "
                f"(대상 원단: {material_filter})")
 
-    # ── 원단별 요약 카드 (사장님 확정 2026-07-15) ───────────────
-    def _pct_disp(v):
-        return f"{v:+.1f}%" if v is not None else "—"
-
-    by_mat: dict[str, list[dict]] = {}
-    for m in shown_pairs:
-        by_mat.setdefault(pair_material_code(m) or "기타", []).append(m)
+    # ── 원단별 요약 (면적 판정 기준) ──
+    by_mat: dict[str, list] = {}
+    for m, cr, pm, mm in corner_data:
+        by_mat.setdefault(pair_material_code(m) or "기타", []).append((m, cr))
     if by_mat:
         st.markdown("##### 원단별 요약")
-        for code, ms in by_mat.items():
+        for code, items in by_mat.items():
             parts = []
-            for m in ms:
-                vd = _pair_verdict(m)
-                lbl = vd["worst_label"] if vd else "❓"
-                parts.append(
-                    f"{_piece_label(m)} 가로{_pct_disp(m.get('width_expansion_pct'))}"
-                    f"/세로{_pct_disp(m.get('height_expansion_pct'))} {lbl}"
-                )
+            for m, cr in items:
+                v = cr["verdict"]
+                lbl = v["label"] if v else "❓"
+                parts.append(f"{_piece_label(m)} 면적{_pct_disp(cr['area_exp'])} {lbl}")
             st.markdown(f"**{code}** — " + ", ".join(parts))
 
-    # ── 조각별 상세 (default 접힘) ──────────────────────────────
-    # 사장님 지시 2026-07-15: PP/메인 썸네일 나란히 + 가로/세로/면적 확대율 + 판정 라벨.
-    with st.expander("조각별 상세 (썸네일 + 가로/세로/면적 확대율 + 판정)", expanded=False):
-        THUMB_PX = 120
-        COL_RATIO = [1.2, 1.2, 1.4, 1.5, 1.5, 1.0, 1.2]
+    st.markdown("#### 📐 패턴조각별 세부 축율 비교")
+    st.caption("판정 = 면적 확대율 (조각 총 크기 변화). 세로/가로는 근거 · 정합성 = 이론 면적 vs 실제 면적.")
+    if not corner_data:
+        st.caption("(표시할 매칭 조각이 없습니다 — 원단 필터 확인)")
+    else:
+        def _len_compact(name, pp_v, main_v, exp):
+            """컴팩트 인라인: '정중앙 세로 40.97→38.87cm (-5.1%)'."""
+            if pp_v is None or main_v is None:
+                return f"{name} —"
+            return f"{name} {pp_v:.2f}→{main_v:.2f}cm ({_pct_disp(exp)})"
 
-        def _method_disp(m: dict) -> str:
-            """매칭 근거 라벨 (사장님 원칙 #2 — 근거 없는 결과 표시 금지).
+        _CONF_BADGE = {"name_shape": "✅ 이름+도형", "shape": "🔷 도형",
+                       "suspect": "⚠️ 의심"}
+        _SEV_COLOR = {"critical": "#DC2626", "warning": "#F59E0B", "ok": "#16A34A"}
 
-            낮은 유사도(SHAPE_LOW_SIM_CEIL 미만)는 연한 노란 배경 강조.
-            """
-            if m["match_method"] == "block_name":
-                return "🔤 이름 매칭"
-            if m["match_method"] == "shape":
-                sim = m.get("similarity_score")
-                if sim is None:
-                    return "🔷 도형 매칭"
-                txt = f"🔷 도형 매칭 ({sim * 100:.0f}%)"
-                if sim < SHAPE_LOW_SIM_CEIL:
-                    return (f'<span style="background:#fef9c3;padding:2px 6px;'
-                            f'border-radius:4px;">⚠️ {txt}</span>')
-                return txt
-            return m["match_method"]
+        # 카드 세로 축소 (사장님 지시 2026-07-27 — padding/gap 반 · 한 화면 6~8조각).
+        st.markdown("""<style>
+        div[data-testid="stVerticalBlockBorderWrapper"]{margin-bottom:8px;}
+        div[data-testid="stVerticalBlockBorderWrapper"] > div{padding-top:0.4rem !important;
+            padding-bottom:0.4rem !important;}
+        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]{gap:0.2rem;}
+        div[data-testid="stVerticalBlockBorderWrapper"] h3{margin:0;font-size:1.05rem;}
+        </style>""", unsafe_allow_html=True)
 
-        def _axis_cell(actual, dv_dir) -> str:
-            """가로/세로 확대율 셀 (실측% + 판정 라벨 배경색)."""
-            if actual is None:
-                return "—"
-            txt = f"{actual:+.1f}%"
-            if dv_dir is None:
-                return txt
-            bg = _AXIS_SEV_BG.get(dv_dir["severity"], "#f3f4f6")
-            return (f'<span style="background:{bg};padding:2px 6px;'
-                    f'border-radius:4px;">{dv_dir["label"]} {txt}</span>')
+        for m, cr, pm, mm in corner_data:
+            v = cr["verdict"]
+            con = cr["consistency"]
+            sev = v["severity"] if v else None
+            color = _SEV_COLOR.get(sev, "#94A3B8")
+            with st.container(border=True):
+                bar, bodyc = st.columns([0.03, 0.97])
+                bar.markdown(
+                    f'<div style="background:{color};width:6px;height:66px;'
+                    f'border-radius:3px;margin-top:2px;"></div>', unsafe_allow_html=True)
+                with bodyc:
+                    h1, h2 = st.columns([3, 2])
+                    h1.markdown(f"### {v['label'] if v else '❓'} {_piece_label(m)}")
+                    h2.markdown(f"매칭 {_CONF_BADGE.get(m.get('confidence'), '🔷 도형')}")
+                    st.markdown(
+                        f"실제 면적 **{m['pp_area'] * 100:,.0f} → {m['main_area'] * 100:,.0f} mm²**  ·  "
+                        f"면적 **{_pct_disp(cr['area_exp'])}**  ·  "
+                        f"세로 {_pct_disp(cr['height_actual'])}  ·  가로 {_pct_disp(cr['width_actual'])}  ·  "
+                        f"정합성 {'⚠️ 이상' if con['flag'] else '정합'}"
+                    )
+                    with st.expander("상세 (근거 · 오버랩)", expanded=False):
+                        # 좌: 데이터(컴팩트) / 우: 오버랩 이미지(실제 크기 비율) — 사장님 지시 2026-07-27.
+                        col_data, col_image = st.columns([6, 4])
+                        with col_data:
+                            lines = []   # 컴팩트 인라인 (라벨 값 짧게)
+                            pcv = (pm.get("center_axes") or {}); mcv = (mm.get("center_axes") or {})
+                            lines.append(_len_compact("정중앙 세로", pcv.get("vertical"),
+                                                      mcv.get("vertical"), cr.get("center_v_expansion")))
+                            lines.append(_len_compact("정중앙 가로", pcv.get("horizontal"),
+                                                      mcv.get("horizontal"), cr.get("center_h_expansion")))
+                            if cr["method"] == "circle":
+                                de = cr["diameter_expansion"]
+                                pc = (pm.get("circle") or {}); mmc = (mm.get("circle") or {})
+                                lines.append(_len_compact("세로 지름", pc.get("v_diameter"),
+                                                          mmc.get("v_diameter"), de["vertical"]))
+                                lines.append(_len_compact("가로 지름", pc.get("h_diameter"),
+                                                          mmc.get("h_diameter"), de["horizontal"]))
+                            elif cr["method"] == "corner":
+                                ee = cr["edges_expansion"]
+                                pe = pm.get("edges") or {}; me = mm.get("edges") or {}
+                                lines.append(_len_compact("좌변", pe.get("left"), me.get("left"), ee["left"]))
+                                lines.append(_len_compact("우변", pe.get("right"), me.get("right"), ee["right"]))
+                                lines.append(_len_compact("상변", pe.get("top"), me.get("top"), ee["top"]))
+                                lines.append(_len_compact("하변", pe.get("bottom"), me.get("bottom"), ee["bottom"]))
+                                for s in cr["symmetry"]:
+                                    lines.append(f"⚠️ {s}")
+                            else:
+                                lines.append(f"세로(참고) {_pct_disp(cr['height_actual'])} · "
+                                             f"가로(참고) {_pct_disp(cr['width_actual'])}")
+                            lines.append(("⚠️ 이상" if con["flag"] else "정합") + f" · {con['msg']}")
+                            st.markdown(
+                                '<div style="font-size:12px;line-height:1.4">'
+                                + "<br>".join(lines) + "</div>", unsafe_allow_html=True)
+                            if con["flag"]:
+                                pp_n = len((m.get("pp_piece") or {}).get("coords_cm") or [])
+                                main_n = len((m.get("main_piece") or {}).get("coords_cm") or [])
+                                st.caption(f"⚠️ 재샘플링 차 {abs(pp_n - main_n)}점 (QC {pp_n}·PP {main_n}) "
+                                           f"· 4코너 정확도 낮음 · 오버랩 육안 확인")
+                            for w in (cr["warnings"] or []):
+                                st.caption(f"⚠️ {w}")
+                        with col_image:
+                            scale = _piece_max_dim(m) / global_max_dim if global_max_dim else 1.0
+                            ov = _axul_overlap_png((m.get("pp_piece") or {}).get("coords_cm"),
+                                                   (m.get("main_piece") or {}).get("coords_cm"),
+                                                   cr, mm, scale=scale)
+                            if ov:
+                                st.image(ov, use_container_width=False,
+                                         caption="QC(파랑) vs PP(빨강) · 측정 변(파랑=세로/초록=가로) · "
+                                                 "중앙 십자선(주황 dashed)")
 
-        def _exp_disp(v):
-            return f"{v:+.2f} %" if v is not None else "계산 불가"
-
-        has_any = bool(shown_pairs or shown_unmatched_pp or shown_unmatched_main)
-        if not has_any:
-            st.caption("(표시할 조각이 없습니다 — 원단 필터 확인)")
-        else:
-            hc = st.columns(COL_RATIO)
-            for col, txt in zip(hc, ["PP", "메인", "블록 이름", "가로 확대율",
-                                     "세로 확대율", "면적 확대율", "매칭 방식"]):
-                col.markdown(f"**{txt}**")
-
-            # 매칭된 쌍
-            for m in shown_pairs:
-                vd = _pair_verdict(m)
-                w_dir = vd["width"] if vd else None
-                h_dir = vd["height"] if vd else None
-                block_disp = (
-                    m["block_name_pp"]
-                    if m["block_name_pp"] == m["block_name_main"]
-                    else f'{m["block_name_pp"] or "(무명)"} ↔ {m["block_name_main"] or "(무명)"}'
-                )
-                rc = st.columns(COL_RATIO)
-                rc[0].markdown(_axul_thumb_html(m.get("pp_piece"), THUMB_PX),
-                               unsafe_allow_html=True)
-                rc[1].markdown(_axul_thumb_html(m.get("main_piece"), THUMB_PX),
-                               unsafe_allow_html=True)
-                rc[2].markdown(block_disp or "(무명)")
-                rc[3].markdown(_axis_cell(m.get("width_expansion_pct"), w_dir),
-                               unsafe_allow_html=True)
-                rc[4].markdown(_axis_cell(m.get("height_expansion_pct"), h_dir),
-                               unsafe_allow_html=True)
-                rc[5].markdown(_exp_disp(m["expansion_pct"]))
-                rc[6].markdown(_method_disp(m), unsafe_allow_html=True)
-
-            # PP 만 있음 (메인 매칭 없음)
-            for u in shown_unmatched_pp:
-                rc = st.columns(COL_RATIO)
-                rc[0].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
-                               unsafe_allow_html=True)
-                rc[1].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
-                rc[2].markdown((u["block_name"] or "(무명)") + " (PP만)")
-                rc[3].markdown("—")
-                rc[4].markdown("—")
-                rc[5].markdown("—")
-                rc[6].markdown("❌ 매칭 없음")
-
-            # 메인 만 있음 (PP 매칭 없음)
-            for u in shown_unmatched_main:
-                rc = st.columns(COL_RATIO)
-                rc[0].markdown(_axul_no_match_box(THUMB_PX), unsafe_allow_html=True)
-                rc[1].markdown(_axul_thumb_html(u.get("piece"), THUMB_PX),
-                               unsafe_allow_html=True)
-                rc[2].markdown((u["block_name"] or "(무명)") + " (메인만)")
-                rc[3].markdown("—")
-                rc[4].markdown("—")
-                rc[5].markdown("—")
-                rc[6].markdown("❌ 매칭 없음")
-
-        # 총계 행 (합계 + 평균 면적 확대율 — 전체 기준).
-        exp_vals = [m["expansion_pct"] for m in result["matched_pairs"]
-                    if m["expansion_pct"] is not None]
-        avg_exp = (sum(exp_vals) / len(exp_vals)) if exp_vals else None
-        total_exp = result["total_expansion_pct"]
-        st.markdown(
-            f"**총계 (전체)** — PP {result['pp_total_area_cm2']:,.1f} cm² · "
-            f"메인 {result['main_total_area_cm2']:,.1f} cm² · "
-            f"총면적 확대율 {('%.2f%%' % total_exp) if total_exp is not None else '계산 불가'} · "
-            f"조각 평균 면적 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
-            f"(매칭 {len(result['matched_pairs'])}쌍)"
-        )
+    # ── 총계 (전체 매칭 기준) ───────────────────────────────────
+    total_exp = result["total_expansion_pct"]
+    exp_vals = [m["expansion_pct"] for m in result["matched_pairs"]
+                if m["expansion_pct"] is not None]
+    avg_exp = (sum(exp_vals) / len(exp_vals)) if exp_vals else None
+    st.markdown(
+        f"**총계 (전체)** — PP {result['pp_total_area_cm2']:,.1f} cm² · "
+        f"메인 {result['main_total_area_cm2']:,.1f} cm² · "
+        f"총면적 확대율 {('%.2f%%' % total_exp) if total_exp is not None else '계산 불가'} · "
+        f"조각 평균 면적 확대율 {('%.2f%%' % avg_exp) if avg_exp is not None else '계산 불가'} "
+        f"(매칭 {len(result['matched_pairs'])}쌍)"
+    )
 
     # ── 다운로드 (PDF / Excel) — Task #38, 화면 스코프(선택 원단) 그대로 ────
     st.markdown("#### 결과 다운로드")
 
-    def _sev_of(vd, key):
-        return vd[key]["severity"] if vd else None
-
-    # 조각별 상세 pairs 구성 (매칭 + 미매칭 — 화면 스코프).
-    axis_pairs: list[dict] = []
-    for m in shown_pairs:
-        vd = _pair_verdict(m)
-        axis_pairs.append({
+    # 조각별 리포트 데이터 (신규 로직 — 면적 우선 판정 + 근거 + 오버랩 · corner_data 재사용).
+    report_pairs: list[dict] = []
+    for m, cr, pm, mm in corner_data:
+        v = cr["verdict"]
+        con = cr["consistency"]
+        pe = pm.get("edges") or {}
+        me = mm.get("edges") or {}
+        ee = cr.get("edges_expansion") or {}
+        edges = None
+        if cr["method"] == "corner":
+            edges = {k: (pe.get(k), me.get(k), ee.get(k))
+                     for k in ("left", "right", "top", "bottom")}
+        diameters = None
+        if cr["method"] == "circle":
+            de = cr.get("diameter_expansion") or {}
+            pc = pm.get("circle") or {}
+            mc = mm.get("circle") or {}
+            diameters = {
+                "vertical": (pc.get("v_diameter"), mc.get("v_diameter"), de.get("vertical")),
+                "horizontal": (pc.get("h_diameter"), mc.get("h_diameter"), de.get("horizontal")),
+            }
+        ov = _axul_overlap_png((m.get("pp_piece") or {}).get("coords_cm"),
+                               (m.get("main_piece") or {}).get("coords_cm"), cr, mm)
+        report_pairs.append({
             "block_name": _piece_label(m),
             "material": pair_material_code(m) or material_filter,
-            "pp_area": m.get("pp_area"),
-            "main_area": m.get("main_area"),
-            "width_exp": m.get("width_expansion_pct"),
-            "height_exp": m.get("height_expansion_pct"),
-            "area_exp": m.get("expansion_pct"),
-            "width_sev": _sev_of(vd, "width"),
-            "height_sev": _sev_of(vd, "height"),
-            "reasons": vd["reasons"] if vd else [],
-            "pp_coords": (m.get("pp_piece") or {}).get("coords_cm"),
-            "main_coords": (m.get("main_piece") or {}).get("coords_cm"),
-            "matched": True,
-        })
-    for u in shown_unmatched_pp:
-        axis_pairs.append({
-            "block_name": (u["block_name"] or "(무명)") + " (PP만)",
-            "material": material_filter, "pp_area": u.get("area"), "main_area": None,
-            "width_exp": None, "height_exp": None, "area_exp": None,
-            "width_sev": None, "height_sev": None, "reasons": [],
-            "pp_coords": (u.get("piece") or {}).get("coords_cm"), "main_coords": None,
-            "matched": False,
-        })
-    for u in shown_unmatched_main:
-        axis_pairs.append({
-            "block_name": (u["block_name"] or "(무명)") + " (메인만)",
-            "material": material_filter, "pp_area": None, "main_area": u.get("area"),
-            "width_exp": None, "height_exp": None, "area_exp": None,
-            "width_sev": None, "height_sev": None, "reasons": [],
-            "pp_coords": None, "main_coords": (u.get("piece") or {}).get("coords_cm"),
-            "matched": False,
+            "confidence": m.get("confidence"),
+            "verdict_label": v["label"] if v else "❓",
+            "verdict_severity": (v["severity"] if v else None),
+            "pp_area_mm2": (m.get("pp_area") or 0.0) * 100.0,
+            "main_area_mm2": (m.get("main_area") or 0.0) * 100.0,
+            "area_exp": cr["area_exp"],
+            "v_actual": cr["height_actual"],   # 세로 근거
+            "h_actual": cr["width_actual"],    # 가로 근거
+            "consistency_flag": con["flag"],
+            "consistency_msg": con["msg"],
+            "method": cr["method"],
+            "edges": edges,
+            "diameters": diameters,
+            "corners_main": mm.get("corners"),
+            "symmetry": cr["symmetry"],
+            "overlap_png": ov,
         })
 
-    worst_sev = "ok"
-    _rank = {"ok": 0, "warning": 1, "critical": 2}
-    for p in axis_pairs:
-        for s in (p["width_sev"], p["height_sev"]):
-            if s and _rank.get(s, 0) > _rank[worst_sev]:
-                worst_sev = s
-
+    worst_sev = "critical" if n_crit else ("warning" if n_warn else "ok")
     style_label = (pp_parsed.get("style") or main_parsed.get("style")
                    or pp_parsed.get("file_name") or "STYLE")
     now = datetime.now()
@@ -4200,12 +4322,12 @@ def render_pp_vs_main_tab() -> None:
         "n_crit": n_crit,
         "material_summary": [{
             "material": material_filter,
-            "n_pieces": len(shown_pairs),
+            "n_pieces": len(corner_data),
             "n_warn": n_warn,
             "n_crit": n_crit,
             "worst_sev": worst_sev,
         }],
-        "pairs": axis_pairs,
+        "pairs": report_pairs,
     }
 
     fname_base = f"{str(style_label).replace(' ', '_')}_{target_size}_{now.strftime('%Y%m%d_%H%M')}"

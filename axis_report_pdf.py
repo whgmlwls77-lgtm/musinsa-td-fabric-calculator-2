@@ -12,13 +12,13 @@ import io
 import os
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A3, A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    Image as RLImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    Image as RLImage, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
 # 요척 PDF 와 동일한 폰트 후보 (app.py _FONT_CANDIDATES 미러 — import 회피용).
@@ -141,7 +141,7 @@ def build_axis_pdf(context: dict) -> bytes:
     cell = ParagraphStyle("AxCell", parent=styles["Normal"], fontName=font, fontSize=8)
 
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A3),   # A3 가로 (한 페이지 그리드)
                             leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     el = []
 
@@ -207,32 +207,31 @@ def build_axis_pdf(context: dict) -> bytes:
         el.append(t)
         el.append(Spacer(1, 10))
 
-    # 조각별 상세 표 (썸네일 + 가로/세로/면적 확대율 + 판정)
+    # 조각별 요약 표 (면적 우선 판정 — 사장님 재설계 2026-07-26)
     pairs = context.get("pairs") or []
-    el.append(Paragraph("조각별 상세", section))
+    el.append(Paragraph("패턴조각별 세부 축율 비교", section))
     if not pairs:
         el.append(Paragraph("(표시할 조각이 없습니다)", small))
     else:
-        header = ["블록 이름", "PP", "메인", "가로", "세로", "면적", "판정"]
+        header = ["조각명", "판정", "실제 면적 (QC→PP)", "면적%", "세로%", "가로%", "정합성"]
         data = [[Paragraph(f"<b>{h}</b>", cell) for h in header]]
         sev_bg = []  # (row_idx, col_idx, color)
         for i, p in enumerate(pairs, start=1):
-            w_sev = p.get("width_sev")
-            h_sev = p.get("height_sev")
-            worst = _worst(w_sev, h_sev)
-            verdict_word = _SEV_DISP.get(worst, ("—", colors.white))[0] if worst else "—"
+            sev = p.get("verdict_severity")
+            word = _SEV_DISP.get(sev, ("—", colors.white))[0] if sev else "—"
+            area_txt = f"{p.get('pp_area_mm2', 0):,.0f} → {p.get('main_area_mm2', 0):,.0f} mm²"
             data.append([
                 Paragraph(str(p.get("block_name") or "(무명)"), cell),
-                _thumb_cell(p.get("pp_coords"), font),
-                _thumb_cell(p.get("main_coords"), font),
-                Paragraph(_pct(p.get("width_exp")), cell),
-                Paragraph(_pct(p.get("height_exp")), cell),
+                Paragraph(word, cell),
+                Paragraph(area_txt, cell),
                 Paragraph(_pct(p.get("area_exp")), cell),
-                Paragraph(verdict_word, cell),
+                Paragraph(_pct(p.get("v_actual")), cell),
+                Paragraph(_pct(p.get("h_actual")), cell),
+                Paragraph("이상" if p.get("consistency_flag") else "정합", cell),
             ])
-            if worst and worst in _SEV_DISP:
-                sev_bg.append((i, 6, _SEV_DISP[worst][1]))
-        t = Table(data, colWidths=[110, 48, 48, 55, 55, 55, 60])
+            if sev in _SEV_DISP:
+                sev_bg.append((i, 1, _SEV_DISP[sev][1]))
+        t = Table(data, colWidths=[75, 55, 110, 48, 48, 48, 50])
         style_cmds = [
             ("FONTNAME", (0, 0), (-1, -1), font),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
@@ -245,17 +244,44 @@ def build_axis_pdf(context: dict) -> bytes:
             style_cmds.append(("BACKGROUND", (ci, ri), (ci, ri), col))
         t.setStyle(TableStyle(style_cmds))
         el.append(t)
+        el.append(Paragraph(
+            "판정 = 면적 확대율(조각 총 크기). 세로/가로 = 근거. 정합성 = 이론 면적 vs 실제 면적.",
+            small))
 
-        # 위반 사유 (있으면)
-        reason_lines = []
+        # 조각별 그리드 (오버랩 이미지 + 축율 요약 · 2×4 = 8조각/페이지 · A3 가로)
+        el.append(Spacer(1, 10))
+        el.append(Paragraph("조각별 오버랩 + 축율 요약", section))
+        cells = []
         for p in pairs:
-            for r in (p.get("reasons") or []):
-                reason_lines.append(f"· {p.get('block_name') or '(무명)'}: {r}")
-        if reason_lines:
-            el.append(Spacer(1, 8))
-            el.append(Paragraph("위반 사유", section))
-            for line in reason_lines:
-                el.append(Paragraph(line, body))
+            ov = p.get("overlap_png")
+            img = None
+            if ov:
+                try:
+                    img = _fit_image(ov, 170.0, 170.0)
+                except Exception:
+                    img = Paragraph("(이미지 실패)", small)
+            sev = p.get("verdict_severity")
+            word = _SEV_DISP.get(sev, ("—", colors.white))[0] if sev else "—"
+            txt = Paragraph(
+                f"<b>{word} {p.get('block_name') or '(무명)'}</b><br/>"
+                f"면적 {_pct(p.get('area_exp'))} · 세로 {_pct(p.get('v_actual'))} · "
+                f"가로 {_pct(p.get('h_actual'))}<br/>"
+                f"{'⚠️ 이상' if p.get('consistency_flag') else '정합'}", cell)
+            cells.append([img, txt] if img else [txt])
+        ncol = 4
+        rows = [cells[i:i + ncol] for i in range(0, len(cells), ncol)]
+        for r in rows:
+            while len(r) < ncol:
+                r.append("")
+        grid = Table(rows, colWidths=[268] * ncol)
+        grid.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        el.append(grid)
 
     el.append(Spacer(1, 16))
     el.append(Paragraph(
@@ -263,6 +289,21 @@ def build_axis_pdf(context: dict) -> bytes:
 
     doc.build(el)
     return buf.getvalue()
+
+
+def _edge_line(name, tpl) -> str:
+    """(pp_len, main_len, exp%) → '좌변 40.88 → 38.52 cm (-5.76%)' 문자열."""
+    if not tpl or tpl[0] is None or tpl[1] is None:
+        return f"· {name} —"
+    pp_v, main_v, exp = tpl
+    return f"· {name} {pp_v:.2f} → {main_v:.2f} cm ({_pct(exp)})"
+
+
+def _fit_image(png: bytes, max_w: float, max_h: float) -> RLImage:
+    """PNG → 종횡비 유지 RLImage (max_w × max_h 안에 맞춤)."""
+    w, h = ImageReader(io.BytesIO(png)).getSize()
+    ratio = min(max_w / w, max_h / h, 1.0)
+    return RLImage(io.BytesIO(png), width=w * ratio, height=h * ratio)
 
 
 def _worst(a, b):

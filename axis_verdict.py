@@ -103,3 +103,176 @@ def verdict_pair(
         "worst_label": worst["label"],
         "reasons": reasons,
     }
+
+
+# ╔════════════════════════════════════════════════════════════╗
+# ║ Task #38-g: 조각 유형별 축율 계산 + 대칭성 진단             ║
+# ╚════════════════════════════════════════════════════════════╝
+AXIS_SYMMETRY_TOL_PCT = 0.5   # 좌/우·상/하 확대율 차 이 값(%p) 이상이면 비대칭 알림
+
+
+def _dim_pct(pp_dim, main_dim):
+    """(main - pp) / pp × 100. pp ≤ 0 or None 이면 None (계산 불가)."""
+    if pp_dim is None or main_dim is None or pp_dim <= 0:
+        return None
+    return (main_dim - pp_dim) / pp_dim * 100.0
+
+
+def _symmetry_diagnosis(left, right, top, bottom) -> list:
+    """좌/우(세로 축)·상/하(가로 축) 확대율 편차가 임계 이상이면 비대칭 알림.
+
+    사각형/N각형/삼각형 전용 (원형은 호출 안 함). 값이 None 이면 해당 축 건너뜀.
+    """
+    msgs = []
+    if left is not None and right is not None and abs(left - right) >= AXIS_SYMMETRY_TOL_PCT:
+        msgs.append(
+            f"세로 축 비대칭 — 좌변 {left:+.1f}% vs 우변 {right:+.1f}% "
+            f"(차 {abs(left - right):.1f}%p)"
+        )
+    if top is not None and bottom is not None and abs(top - bottom) >= AXIS_SYMMETRY_TOL_PCT:
+        msgs.append(
+            f"가로 축 비대칭 — 상변 {top:+.1f}% vs 하변 {bottom:+.1f}% "
+            f"(차 {abs(top - bottom):.1f}%p)"
+        )
+    return msgs
+
+
+def _avg(a, b):
+    vals = [v for v in (a, b) if v is not None]
+    return sum(vals) / len(vals) if vals else None
+
+
+# 정합성 임계 — 이론 면적(세로·가로 종합) vs 실제 면적 차 이 값(%p) 이상이면 이상 신호.
+AXIS_CONSISTENCY_TOL_PCT = 2.0
+
+
+def _theoretical_area_pct(v_pct, h_pct):
+    """세로·가로 축율(%) → 이론 면적 확대율(%) = (1+v)(1+h)-1. None 이면 None."""
+    if v_pct is None or h_pct is None:
+        return None
+    return ((1.0 + v_pct / 100.0) * (1.0 + h_pct / 100.0) - 1.0) * 100.0
+
+
+def verdict_area(area_pct: float, declared_pct: float) -> dict:
+    """면적 확대율 기반 판정 (사장님 재설계 2026-07-26 — 판정 = 면적만).
+
+    - 🚨 critical : |면적 확대율| > 5% (INDUSTRY_MAX · 양방향 상한)
+    - ⚠️ warning  : 면적 확대율 > 신고 (declared · 확대 방향만 · round tolerance)
+    - ✅ ok        : 그 외
+    기존 verdict_single (축별 판정) 은 무손상 — 별도 함수.
+    """
+    ar = round(area_pct, 1)
+    dr = round(declared_pct, 1)
+    if round(abs(area_pct), 1) > INDUSTRY_MAX_AXIS_PCT:
+        label, severity = "🚨", "critical"
+        reason = f"면적 확대율 {area_pct:.1f}% — 실무 상한 ±{INDUSTRY_MAX_AXIS_PCT:.0f}% 초과."
+    elif ar > dr:
+        label, severity = "⚠️", "warning"
+        reason = f"면적 확대율 {area_pct:.1f}% > 신고 {declared_pct:.1f}% — 신고 대비 큼."
+    else:
+        label, severity = "✅", "ok"
+        reason = f"면적 확대율 {area_pct:.1f}% ≤ 신고 {declared_pct:.1f}% — 정상."
+    return {"label": label, "severity": severity, "reason": reason,
+            "area_pct": area_pct, "declared_pct": declared_pct}
+
+
+def verdict_from_measures(
+    pp_measure: dict,
+    main_measure: dict,
+    width_declared: float,
+    height_declared: float,
+    area_exp: float | None = None,
+    bbox_width_exp: float | None = None,
+    bbox_height_exp: float | None = None,
+) -> dict:
+    """PP·메인 측정 결과 + 면적 확대율 → 판정(면적 기준) + 근거(세로/가로/4변) + 정합성.
+
+    사장님 재설계 (2026-07-26):
+      - 판정 = 면적 확대율만 (verdict_area · round tolerance · ±5% 상한).
+      - 세로/가로/4변 축율 = 판정 X · 근거 정보로만.
+      - 대칭성 = 근거 정보로만.
+      - 정합성: 이론 면적(1+세로)(1+가로)-1 vs 실제 면적, 차 > 2%p → 이상 신호.
+
+    측정 (좌변/우변=식서 세로, 상변/하변=식서 가로):
+      - 사각형류: 세로=(좌+우)/2, 가로=(상+하)/2 / 원형: 세로·가로 지름
+      - 측정 불가 → bbox 세로/가로 참고 (근거만 · 판정은 여전히 면적).
+
+    Returns:
+      {
+        "piece_type", "method": "corner"|"circle"|"fallback_bbox",
+        "edges_expansion": {left,right,top,bottom} | None,
+        "diameter_expansion": {"vertical","horizontal"} | None,
+        "width_actual" (가로 근거), "height_actual" (세로 근거),
+        "area_exp": float | None,
+        "verdict": verdict_area(...) | None,   # 면적 기준 판정
+        "symmetry": [str, ...],
+        "consistency": {"theoretical","actual","diff","flag","msg"},
+        "warnings": [str, ...],
+      }
+    """
+    ptype = (main_measure or {}).get("piece_type") or (pp_measure or {}).get("piece_type") or "unknown"
+    warnings = list((pp_measure or {}).get("warnings") or [])
+    warnings += list((main_measure or {}).get("warnings") or [])
+
+    pp_edges = (pp_measure or {}).get("edges")
+    main_edges = (main_measure or {}).get("edges")
+    pp_circle = (pp_measure or {}).get("circle")
+    main_circle = (main_measure or {}).get("circle")
+
+    method = "fallback_bbox"
+    edges_expansion = None
+    diameter_expansion = None
+    symmetry: list = []
+
+    # 정중앙 세로/가로 확대율 (근거 — 판정 무영향, 사장님 지시 2026-07-27).
+    pp_ctr = (pp_measure or {}).get("center_axes") or {}
+    main_ctr = (main_measure or {}).get("center_axes") or {}
+    center_v_exp = _dim_pct(pp_ctr.get("vertical"), main_ctr.get("vertical"))
+    center_h_exp = _dim_pct(pp_ctr.get("horizontal"), main_ctr.get("horizontal"))
+
+    if pp_circle and main_circle:
+        method = "circle"
+        v_actual = _dim_pct(pp_circle.get("v_diameter"), main_circle.get("v_diameter"))
+        h_actual = _dim_pct(pp_circle.get("h_diameter"), main_circle.get("h_diameter"))
+        diameter_expansion = {"vertical": v_actual, "horizontal": h_actual}
+    elif pp_edges and main_edges:
+        method = "corner"
+        le = _dim_pct(pp_edges.get("left"), main_edges.get("left"))
+        re = _dim_pct(pp_edges.get("right"), main_edges.get("right"))
+        te = _dim_pct(pp_edges.get("top"), main_edges.get("top"))
+        be = _dim_pct(pp_edges.get("bottom"), main_edges.get("bottom"))
+        edges_expansion = {"left": le, "right": re, "top": te, "bottom": be}
+        h_actual = _avg(te, be)   # 가로 = 상+하 (기존 유지)
+        v_actual = _avg(le, re)   # 세로 = 좌+우 (각도 4코너로 왜곡 없음 · G-F 폐기 2026-07-27)
+        symmetry = _symmetry_diagnosis(le, re, te, be)
+    else:
+        v_actual = bbox_height_exp   # 근거 없음 → bbox 참고
+        h_actual = bbox_width_exp
+        warnings.append("조각 4코너/원형 측정 불가 — 세로/가로는 bbox 참고값 (판정은 면적 기준).")
+
+    # ── 판정 = 면적 확대율만 ──
+    declared_area = _theoretical_area_pct(height_declared, width_declared) or 0.0
+    verdict = verdict_area(area_exp, declared_area) if area_exp is not None else None
+
+    # ── 정합성: 이론 면적(세로·가로) vs 실제 면적 ──
+    theo = _theoretical_area_pct(v_actual, h_actual)
+    if theo is not None and area_exp is not None:
+        diff = abs(theo - area_exp)
+        flag = diff > AXIS_CONSISTENCY_TOL_PCT
+        msg = (f"이상 신호 — 이론 면적 {theo:+.1f}% vs 실제 {area_exp:+.1f}% (차 {diff:.1f}%p)"
+               if flag else f"정합 — 이론 {theo:+.1f}% ≈ 실제 {area_exp:+.1f}% (차 {diff:.1f}%p)")
+        consistency = {"theoretical": theo, "actual": area_exp, "diff": diff,
+                       "flag": flag, "msg": msg}
+    else:
+        consistency = {"theoretical": theo, "actual": area_exp, "diff": None,
+                       "flag": False, "msg": "정합성 계산 불가 (측정/면적 부재)"}
+
+    return {
+        "piece_type": ptype, "method": method,
+        "edges_expansion": edges_expansion, "diameter_expansion": diameter_expansion,
+        "width_actual": h_actual, "height_actual": v_actual,
+        "center_v_expansion": center_v_exp,   # 정중앙 세로 (근거 · Task 2026-07-27)
+        "center_h_expansion": center_h_exp,   # 정중앙 가로 (근거)
+        "area_exp": area_exp, "verdict": verdict,
+        "symmetry": symmetry, "consistency": consistency, "warnings": warnings,
+    }

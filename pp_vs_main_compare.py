@@ -26,6 +26,16 @@ from shape_similarity import shape_similarity
 SHAPE_MATCH_THRESHOLD = 0.85  # 사장님 확정 2026-07-15
                               # 근거: 사각 vs 원 극단 케이스 (0.830) 차단 최소값
                               # 사용자 조정 X (사장님 원칙 — 시스템 표준)
+SHAPE_SUSPECT_MIN = 0.5       # 이름 매칭이어도 도형 유사도 이 값 미만이면 무효 → 재매칭
+                              # (Task #38-g 지적 1 — shape similarity 게이트)
+
+# 매칭 신뢰도 (UI 배지):
+#   name_shape ✅ 이름+도형 (이름 동일 + 도형 유사 ≥ 0.85)
+#   shape      🔷 도형 매칭 (이름 다름/무효 → 도형 재매칭)
+#   suspect    ⚠️ 의심 매칭 (0.5 ≤ 유사도 < 0.85)
+CONF_NAME_SHAPE = "name_shape"
+CONF_SHAPE = "shape"
+CONF_SUSPECT = "suspect"
 
 # 재질 표준 코드(협력사 가이드 §4) ↔ 내부 추론값(infer_material_v3 결과, 한글) 매핑.
 # 축율 신고는 원단 코드(SELF/LINING/...) 기준 — 조각 material_inferred 를 코드로 역매핑.
@@ -101,6 +111,7 @@ def _thumb_ref(p: dict) -> dict:
         "material_inferred": p.get("material_inferred"),
         "piece_name": p.get("piece_name") or "",
         "block_name": (p.get("block_name") or "").strip(),
+        "grain": p.get("grain"),   # Task #38-g: 4코너 식서 정렬용 (매칭/확대율과 무관)
     }
 
 
@@ -118,7 +129,8 @@ def _dim_expansion_pct(pp_dim: float, main_dim: float) -> float | None:
     return (main_dim - pp_dim) / pp_dim * 100.0
 
 
-def _matched_entry(pp_p: dict, main_p: dict, method: str, sim: float | None) -> dict:
+def _matched_entry(pp_p: dict, main_p: dict, method: str, sim: float | None,
+                   confidence: str = CONF_SHAPE) -> dict:
     """매칭된 PP↔메인 쌍 1건 dict 생성 (면적 + 가로/세로 bbox 확대율).
 
     가로/세로 확대율은 raw bbox 기반 (회전 정렬 X — 사장님 원칙 #1, 후속 태스크로 분리).
@@ -143,9 +155,15 @@ def _matched_entry(pp_p: dict, main_p: dict, method: str, sim: float | None) -> 
         "height_expansion_pct": _dim_expansion_pct(pp_h, main_h),
         "match_method": method,
         "similarity_score": sim,
+        "confidence": confidence,   # name_shape / shape / suspect (Task #38-g 지적 1)
         "pp_piece": _thumb_ref(pp_p),
         "main_piece": _thumb_ref(main_p),
     }
+
+
+def _has_polygon(coords) -> bool:
+    """폴리곤 성립(정점 3+) 여부 — 도형 유사도 검증 가능한지."""
+    return bool(coords) and len(coords) >= 3
 
 
 def _filter_pieces(pieces: list[dict], target_size: str) -> list[dict]:
@@ -224,13 +242,24 @@ def compare_pp_vs_main(
         candidates = main_by_block.get(bn)
         if not candidates:
             continue
-        # 아직 안 쓴 첫 후보 매칭.
+        # 이름 같은 후보 중 도형 유사도 게이트 통과하는 첫 후보 매칭 (Task #38-g 지적 1).
         for j in candidates:
-            if not main_used[j]:
-                pp_used[i] = True
-                main_used[j] = True
-                matched.append(_matched_entry(pp_p, main[j], "block_name", None))
-                break
+            if main_used[j]:
+                continue
+            pp_c = pp_p.get("coords_cm")
+            main_c = main[j].get("coords_cm")
+            if not _has_polygon(pp_c) or not _has_polygon(main_c):
+                # 좌표 부재 → 도형 검증 불가 → 이름 신뢰 (하위호환).
+                sim, conf = None, CONF_NAME_SHAPE
+            else:
+                sim = shape_similarity(pp_c, main_c)
+                if sim < SHAPE_SUSPECT_MIN:
+                    continue  # 이름 같아도 도형 다름 → 무효 → 다음 후보/Step 2 재매칭
+                conf = CONF_NAME_SHAPE if sim >= SHAPE_MATCH_THRESHOLD else CONF_SUSPECT
+            pp_used[i] = True
+            main_used[j] = True
+            matched.append(_matched_entry(pp_p, main[j], "block_name", sim, conf))
+            break
 
     # ── Step 2: 남은 조각 도형 유사도 매칭 (사장님 확정 2026-07-15) ──
     # 크기(면적) 순 fallback 폐기 — 모양이 완전 다른데 면적만 비슷하면 오매칭.
@@ -250,7 +279,7 @@ def compare_pp_vs_main(
             break   # 정렬돼 있으므로 이후는 전부 임계값 미만.
         if pp_used[i] or main_used[j]:
             continue
-        matched.append(_matched_entry(pp[i], main[j], "shape", sim))
+        matched.append(_matched_entry(pp[i], main[j], "shape", sim, CONF_SHAPE))
         pp_used[i] = True
         main_used[j] = True
 
