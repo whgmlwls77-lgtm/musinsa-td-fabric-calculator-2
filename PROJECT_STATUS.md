@@ -72,6 +72,13 @@
 - **핵심 성과**: 28_Small 소매 세로 **-7.27%→-0.00%** (각도 4코너 · G-F 폐기, 좌우평균이 정확) · MWEKS9D02 BLK_1_1 🚨/BLK_5_1 ✅ 유지 · **회귀 393 passed** · 사장님 시각 검증 ✅
 - 가이드: `PATTERN_PREP_GUIDE.md` v2.1 §12~§14 박제
 
+**후속 UI 조정 (2026-07-27 · commit `acf3084`)** — 실무자 관점 개선:
+- 조각 카드 = HTML div (Streamlit `st.container` 강제 padding 회피 · 좌측 판정별 색 막대 🚨/⚠️/✅ · 세로 축소)
+- 상세 열림 = **HTML flex 전환** (Streamlit `st.columns` 삭제 · `align-items:flex-start`) → 정보 첫 줄 = 오버랩 이미지 상단 정렬 강제 (세로 긴 조각 앞판/뒤판 포함 재발 X)
+- 오버랩 이미지 `max-width:280px · max-height:300px` · 조각 실제 비율 스케일 · 여백 최소(`tight_layout pad 0.3` + `savefig pad_inches 0.02`)
+- 조각 정렬 = 실제 면적 큰 순(내림차순) · 매칭 신뢰도 배지 · 총계 5카드(평균 세로/가로) · G-F 세로 축 삭제
+- **회귀 393 passed · Streamlit HTTP 200 · 사장님 시각 검증 ✅** (직전 라운드 미해결이던 "이미지 상단 정렬"·"HTML flex 전환" 모두 완료)
+
 ### 3.-1. Task #35~#38 완료 — 축율 검증 + 다운로드 재구성 (2026-07-15~24) ⭐
 
 **Task #35** 도형 유사도 매칭 (크기 순 fallback 폐기, `SHAPE_MATCH_THRESHOLD 0.85`) `d406f7e`
