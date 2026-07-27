@@ -13,6 +13,7 @@ V2 → V3 주요 변경:
 """
 
 # ── 표준 ───────────────────────────────────────────────────────
+import base64
 import io
 import json
 import os
@@ -2725,9 +2726,11 @@ def preview_section(pieces_all: list[dict], selected_sizes: list[str],
 # ╔════════════════════════════════════════════════════════════╗
 # ║ PDF 리포트                                                 ║
 # ╚════════════════════════════════════════════════════════════╝
-def figure_to_png_bytes(fig: plt.Figure, dpi: int = 120) -> bytes:
+def figure_to_png_bytes(fig: plt.Figure, dpi: int = 120,
+                        pad_inches: float = 0.1) -> bytes:
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                pad_inches=pad_inches)
     return buf.getvalue()
 
 
@@ -3873,13 +3876,15 @@ def _axul_overlap_png(pp_coords, main_coords, cr: dict,
         ax.legend(fontsize=7, loc="best")
         ax.set_xlabel("cm", fontsize=7)
         ax.tick_params(labelsize=6)
-        png = figure_to_png_bytes(fig, dpi=110)
+        # 상단·하단 여백 최소 (정보 첫 줄과 이미지 상단 정렬 · 사장님 지시 2026-07-27).
+        fig.tight_layout(pad=0.3)
+        png = figure_to_png_bytes(fig, dpi=110, pad_inches=0.02)
         plt.close(fig)
-        # 정밀 상한: 최장변 = 400px × scale (조각 실제 크기 비율 · 최대 400px · 사장님 지시).
+        # 정밀 상한: 최장변 = 250px × scale (조각 실제 크기 비율 · 최대 250px · 사장님 지시).
         try:
             from PIL import Image as _PILImage
             im = _PILImage.open(io.BytesIO(png))
-            target_long = max(80, round(400 * max(0.15, min(1.0, scale))))
+            target_long = max(80, round(250 * max(0.15, min(1.0, scale))))
             long_side = max(im.size)
             if long_side != target_long and long_side > 0:
                 ratio = target_long / long_side
@@ -4164,84 +4169,95 @@ def render_pp_vs_main_tab() -> None:
                        "suspect": "⚠️ 의심"}
         _SEV_COLOR = {"critical": "#DC2626", "warning": "#F59E0B", "ok": "#16A34A"}
 
-        # 카드 세로 축소 (사장님 지시 2026-07-27 — padding/gap 반 · 한 화면 6~8조각).
+        # 상세 좌우 컬럼 top align 강제 (이미지 상단 = 정보 첫 줄 정렬 · 사장님 지시 2026-07-27).
         st.markdown("""<style>
-        div[data-testid="stVerticalBlockBorderWrapper"]{margin-bottom:8px;}
-        div[data-testid="stVerticalBlockBorderWrapper"] > div{padding-top:0.4rem !important;
-            padding-bottom:0.4rem !important;}
-        div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stVerticalBlock"]{gap:0.2rem;}
-        div[data-testid="stVerticalBlockBorderWrapper"] h3{margin:0;font-size:1.05rem;}
+        [data-testid="stColumn"] { align-self: flex-start !important; }
+        [data-testid="stHorizontalBlock"] { align-items: flex-start !important; }
         </style>""", unsafe_allow_html=True)
 
+        # 카드 = 커스텀 HTML div (st.container 강제 padding 회피 · 완벽 제어 · 사장님 지시 2026-07-27).
         for m, cr, pm, mm in corner_data:
             v = cr["verdict"]
             con = cr["consistency"]
-            sev = v["severity"] if v else None
-            color = _SEV_COLOR.get(sev, "#94A3B8")
-            with st.container(border=True):
-                bar, bodyc = st.columns([0.03, 0.97])
-                bar.markdown(
-                    f'<div style="background:{color};width:6px;height:66px;'
-                    f'border-radius:3px;margin-top:2px;"></div>', unsafe_allow_html=True)
-                with bodyc:
-                    h1, h2 = st.columns([3, 2])
-                    h1.markdown(f"### {v['label'] if v else '❓'} {_piece_label(m)}")
-                    h2.markdown(f"매칭 {_CONF_BADGE.get(m.get('confidence'), '🔷 도형')}")
-                    st.markdown(
-                        f"실제 면적 **{m['pp_area'] * 100:,.0f} → {m['main_area'] * 100:,.0f} mm²**  ·  "
-                        f"면적 **{_pct_disp(cr['area_exp'])}**  ·  "
-                        f"세로 {_pct_disp(cr['height_actual'])}  ·  가로 {_pct_disp(cr['width_actual'])}  ·  "
-                        f"정합성 {'⚠️ 이상' if con['flag'] else '정합'}"
-                    )
-                    with st.expander("상세 (근거 · 오버랩)", expanded=False):
-                        # 좌: 데이터(컴팩트) / 우: 오버랩 이미지(실제 크기 비율) — 사장님 지시 2026-07-27.
-                        col_data, col_image = st.columns([6, 4])
-                        with col_data:
-                            lines = []   # 컴팩트 인라인 (라벨 값 짧게)
-                            pcv = (pm.get("center_axes") or {}); mcv = (mm.get("center_axes") or {})
-                            lines.append(_len_compact("정중앙 세로", pcv.get("vertical"),
-                                                      mcv.get("vertical"), cr.get("center_v_expansion")))
-                            lines.append(_len_compact("정중앙 가로", pcv.get("horizontal"),
-                                                      mcv.get("horizontal"), cr.get("center_h_expansion")))
-                            if cr["method"] == "circle":
-                                de = cr["diameter_expansion"]
-                                pc = (pm.get("circle") or {}); mmc = (mm.get("circle") or {})
-                                lines.append(_len_compact("세로 지름", pc.get("v_diameter"),
-                                                          mmc.get("v_diameter"), de["vertical"]))
-                                lines.append(_len_compact("가로 지름", pc.get("h_diameter"),
-                                                          mmc.get("h_diameter"), de["horizontal"]))
-                            elif cr["method"] == "corner":
-                                ee = cr["edges_expansion"]
-                                pe = pm.get("edges") or {}; me = mm.get("edges") or {}
-                                lines.append(_len_compact("좌변", pe.get("left"), me.get("left"), ee["left"]))
-                                lines.append(_len_compact("우변", pe.get("right"), me.get("right"), ee["right"]))
-                                lines.append(_len_compact("상변", pe.get("top"), me.get("top"), ee["top"]))
-                                lines.append(_len_compact("하변", pe.get("bottom"), me.get("bottom"), ee["bottom"]))
-                                for s in cr["symmetry"]:
-                                    lines.append(f"⚠️ {s}")
-                            else:
-                                lines.append(f"세로(참고) {_pct_disp(cr['height_actual'])} · "
-                                             f"가로(참고) {_pct_disp(cr['width_actual'])}")
-                            lines.append(("⚠️ 이상" if con["flag"] else "정합") + f" · {con['msg']}")
-                            st.markdown(
-                                '<div style="font-size:12px;line-height:1.4">'
-                                + "<br>".join(lines) + "</div>", unsafe_allow_html=True)
-                            if con["flag"]:
-                                pp_n = len((m.get("pp_piece") or {}).get("coords_cm") or [])
-                                main_n = len((m.get("main_piece") or {}).get("coords_cm") or [])
-                                st.caption(f"⚠️ 재샘플링 차 {abs(pp_n - main_n)}점 (QC {pp_n}·PP {main_n}) "
-                                           f"· 4코너 정확도 낮음 · 오버랩 육안 확인")
-                            for w in (cr["warnings"] or []):
-                                st.caption(f"⚠️ {w}")
-                        with col_image:
-                            scale = _piece_max_dim(m) / global_max_dim if global_max_dim else 1.0
-                            ov = _axul_overlap_png((m.get("pp_piece") or {}).get("coords_cm"),
-                                                   (m.get("main_piece") or {}).get("coords_cm"),
-                                                   cr, mm, scale=scale)
-                            if ov:
-                                st.image(ov, use_container_width=False,
-                                         caption="QC(파랑) vs PP(빨강) · 측정 변(파랑=세로/초록=가로) · "
-                                                 "중앙 십자선(주황 dashed)")
+            icon = v["label"] if v else "❓"
+            color = {"🚨": "#DC2626", "⚠️": "#F59E0B", "✅": "#16A34A"}.get(icon, "#94A3B8")
+            name = _piece_label(m)
+            badge = _CONF_BADGE.get(m.get("confidence"), "🔷 도형")
+            summary = (
+                f"실제 면적 <b>{m['pp_area'] * 100:,.0f} → {m['main_area'] * 100:,.0f} mm²</b> · "
+                f"면적 <b>{_pct_disp(cr['area_exp'])}</b> · "
+                f"세로 {_pct_disp(cr['height_actual'])} · 가로 {_pct_disp(cr['width_actual'])} · "
+                f"정합성 {'⚠️ 이상' if con['flag'] else '정합'}"
+            )
+            st.markdown(
+                f'<div style="border:1px solid #e5e7eb;border-left:5px solid {color};'
+                f'border-radius:6px;padding:0.4rem 0.8rem;margin-bottom:0.3rem;background:#ffffff;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<div style="font-size:1.05rem;font-weight:600;color:#111827;">{icon} {name}</div>'
+                f'<div style="font-size:0.75rem;color:#6b7280;">매칭 {badge}</div></div>'
+                f'<div style="font-size:0.85rem;color:#374151;margin-top:0.15rem;">{summary}</div>'
+                f'</div>', unsafe_allow_html=True)
+            with st.expander("상세 (근거 · 오버랩)", expanded=False):
+                # Streamlit columns 삭제 → HTML flex 강제 (정보=이미지 상단 정렬 100% · 사장님 지시 2026-07-27).
+                lines = []   # 컴팩트 인라인 (라벨 값 짧게)
+                pcv = (pm.get("center_axes") or {}); mcv = (mm.get("center_axes") or {})
+                lines.append(_len_compact("정중앙 세로", pcv.get("vertical"),
+                                          mcv.get("vertical"), cr.get("center_v_expansion")))
+                lines.append(_len_compact("정중앙 가로", pcv.get("horizontal"),
+                                          mcv.get("horizontal"), cr.get("center_h_expansion")))
+                if cr["method"] == "circle":
+                    de = cr["diameter_expansion"]
+                    pc = (pm.get("circle") or {}); mmc = (mm.get("circle") or {})
+                    lines.append(_len_compact("세로 지름", pc.get("v_diameter"),
+                                              mmc.get("v_diameter"), de["vertical"]))
+                    lines.append(_len_compact("가로 지름", pc.get("h_diameter"),
+                                              mmc.get("h_diameter"), de["horizontal"]))
+                elif cr["method"] == "corner":
+                    ee = cr["edges_expansion"]
+                    pe = pm.get("edges") or {}; me = mm.get("edges") or {}
+                    lines.append(_len_compact("좌변", pe.get("left"), me.get("left"), ee["left"]))
+                    lines.append(_len_compact("우변", pe.get("right"), me.get("right"), ee["right"]))
+                    lines.append(_len_compact("상변", pe.get("top"), me.get("top"), ee["top"]))
+                    lines.append(_len_compact("하변", pe.get("bottom"), me.get("bottom"), ee["bottom"]))
+                    for s in cr["symmetry"]:
+                        lines.append(f"⚠️ {s}")
+                else:
+                    lines.append(f"세로(참고) {_pct_disp(cr['height_actual'])} · "
+                                 f"가로(참고) {_pct_disp(cr['width_actual'])}")
+                lines.append(("⚠️ 이상" if con["flag"] else "정합") + f" · {con['msg']}")
+                info_html = "<br>".join(lines)
+
+                # 오버랩 이미지 base64 (측정 라인·중앙 십자선 무손상).
+                scale = _piece_max_dim(m) / global_max_dim if global_max_dim else 1.0
+                ov = _axul_overlap_png((m.get("pp_piece") or {}).get("coords_cm"),
+                                       (m.get("main_piece") or {}).get("coords_cm"),
+                                       cr, mm, scale=scale)
+                img_html = ""
+                if ov:
+                    img_b64 = base64.b64encode(ov).decode("utf-8")
+                    img_html = (
+                        f'<div style="flex:4;margin:0;padding:0;">'
+                        f'<img src="data:image/png;base64,{img_b64}" '
+                        f'style="max-width:280px;max-height:300px;width:auto;height:auto;'
+                        f'display:block;margin:0;padding:0;">'
+                        f'<div style="font-size:0.7rem;color:#6b7280;margin-top:0.3rem;">'
+                        f'QC(파랑) vs PP(빨강) · 측정 변(파랑=세로/초록=가로) · 중앙 십자선(주황 dashed)'
+                        f'</div></div>')
+
+                # HTML flex 좌우 배치 · align-items:flex-start 강제 (Streamlit columns 우회).
+                st.markdown(
+                    f'<div style="display:flex;align-items:flex-start;gap:20px;margin:0;padding:0;">'
+                    f'<div style="flex:6;font-size:12px;line-height:1.4;">{info_html}</div>'
+                    f'{img_html}</div>',
+                    unsafe_allow_html=True)
+
+                if con["flag"]:
+                    pp_n = len((m.get("pp_piece") or {}).get("coords_cm") or [])
+                    main_n = len((m.get("main_piece") or {}).get("coords_cm") or [])
+                    st.caption(f"⚠️ 재샘플링 차 {abs(pp_n - main_n)}점 (QC {pp_n}·PP {main_n}) "
+                               f"· 4코너 정확도 낮음 · 오버랩 육안 확인")
+                for w in (cr["warnings"] or []):
+                    st.caption(f"⚠️ {w}")
 
     # ── 총계 (전체 매칭 기준) ───────────────────────────────────
     total_exp = result["total_expansion_pct"]
